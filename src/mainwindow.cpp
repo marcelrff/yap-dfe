@@ -942,7 +942,15 @@ void MainWindow::updateUi()
         m_indicators[i]->setStyleSheet(highlight ? QStringLiteral("background: palette(highlight);") : QString());
 
         // Tab titles follow the document: renamed by Save As, starred while unsaved.
-        for (int t = 0; t < m_panes[i]->count(); ++t) {
+        // Skipped while a tab is being removed: QTabWidget drops the page before
+        // the tab, and showing the next page can re-enter here (its resize emits
+        // zoomChanged) with the two out of step. Whoever removes the tab calls
+        // updateUi() again afterwards.
+        const int tabs = m_panes[i]->count();
+        if (tabs > 0 && !m_panes[i]->view(tabs - 1)) {
+            continue;
+        }
+        for (int t = 0; t < tabs; ++t) {
             const std::shared_ptr<Document> doc = m_panes[i]->view(t)->document();
             // "&" would otherwise be read as a keyboard mnemonic.
             const QString name = doc->fileName().replace(QLatin1Char('&'), QStringLiteral("&&"));

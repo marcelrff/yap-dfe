@@ -300,6 +300,26 @@ private Q_SLOTS:
         QVERIFY(!action(f.window, QStringLiteral("Split View"))->isEnabled());
     }
 
+    // Closing a tab reveals its neighbour. If that one was last laid out at a
+    // different window size it resizes, and so re-zooms, in the middle of the
+    // removal, while the pane's tab bar and page stack disagree.
+    void closeTabRevealingStaleTab()
+    {
+        Fixture f;
+        f.window.openFiles({m_a, m_b, m_a});
+        QCOMPARE(f.left->count(), 2);
+        f.left->setCurrentIndex(0);
+        trigger(f.window, QStringLiteral("Fit Width"));
+        f.left->setCurrentIndex(1);
+        f.window.resize(f.window.width() - 300, f.window.height());
+        QCoreApplication::processEvents();
+
+        trigger(f.window, QStringLiteral("Close Tab"));
+        QCOMPARE(f.left->count(), 1);
+        QCOMPARE(f.left->tabText(0), QStringLiteral("a.pdf"));
+        QVERIFY(f.window.windowTitle().startsWith(QStringLiteral("a.pdf")));
+    }
+
     void moveOnlyTabIsNoOp()
     {
         Fixture f;
