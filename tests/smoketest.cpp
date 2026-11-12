@@ -4,6 +4,7 @@
 #include "document.h"
 #include "mainwindow.h"
 #include "pdfview.h"
+#include "singleinstance.h"
 #include "tabpane.h"
 
 #include <QAction>
@@ -318,6 +319,44 @@ private Q_SLOTS:
         QCOMPARE(f.left->count(), 1);
         QCOMPARE(f.left->tabText(0), QStringLiteral("a.pdf"));
         QVERIFY(f.window.windowTitle().startsWith(QStringLiteral("a.pdf")));
+    }
+
+    // A second launch hands its files to the first one's window.
+    void secondLaunchOpensTabs()
+    {
+        Fixture f;
+        f.window.openFile(m_a);
+        const QString base = m_dir.filePath(QStringLiteral("instance"));
+        SingleInstance first(base);
+        QVERIFY(first.claim());
+        connect(&first, &SingleInstance::requestReceived, &f.window, [&](const SingleInstance::Request &request) {
+            f.window.openRequest(request.files, request.split);
+        });
+
+        SingleInstance second(base);
+        QVERIFY(!second.claim());
+        QVERIFY(second.send({{m_b}, false, {}}));
+        QTRY_COMPARE(f.left->count(), 2);
+        QCOMPARE(f.left->currentView()->document()->fileName(), QStringLiteral("b.pdf"));
+        QCOMPARE(f.right->count(), 0);
+
+        // A file that is already open is switched to, not opened twice.
+        QVERIFY(second.send({{m_a}, false, {}}));
+        QTRY_COMPARE(f.left->currentIndex(), 0);
+        QCOMPARE(f.left->count(), 2);
+
+        // --split puts the last file in the right pane.
+        QVERIFY(second.send({{m_a, m_b}, true, {}}));
+        QTRY_COMPARE(f.right->count(), 1);
+        QCOMPARE(f.right->currentView()->document()->fileName(), QStringLiteral("b.pdf"));
+        QCOMPARE(f.left->count(), 2);
+    }
+
+    // With nobody listening the launch must notice and open its own window.
+    void sendWithoutListenerFails()
+    {
+        const SingleInstance lonely(m_dir.filePath(QStringLiteral("nobody")));
+        QVERIFY(!lonely.send({{m_a}, false, {}}, 100));
     }
 
     void moveOnlyTabIsNoOp()

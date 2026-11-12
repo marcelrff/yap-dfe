@@ -50,6 +50,10 @@ split it.
 Started without files, the last window's tabs, split and reading positions
 come back. File ▸ Restore Tabs on Startup switches that off.
 
+Only one window runs at a time: starting yap-dfe again, e.g. by opening a
+PDF from a file manager, adds the files as tabs to the window that is already
+open and brings it to the front. `--new-window` opens a separate one instead.
+
 ### Annotating
 
 | Tool | Shortcut |
@@ -86,4 +90,5 @@ coloured strip on top is the one keyboard commands apply to.
 - `src/findbar.*` — the search strip
 - `src/tabpane.*` — one tab strip and its views
 - `src/mainwindow.*` — the two panes, menus and shortcuts
+- `src/singleinstance.*` — hands a second launch's files to the running window
 - `tests/smoketest.cpp` — drives the real window offscreen

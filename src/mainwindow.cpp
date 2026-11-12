@@ -703,6 +703,31 @@ void MainWindow::openFiles(const QStringList &paths, int pane)
     }
 }
 
+void MainWindow::openRequest(const QStringList &paths, bool split)
+{
+    if (split && paths.size() > 1) {
+        openFiles(paths.mid(0, paths.size() - 1), 0);
+        openFile(paths.last(), 1);
+    } else {
+        openFiles(paths);
+        if (split && !paths.isEmpty() && !isSplit()) {
+            toggleSplit();
+        }
+    }
+}
+
+void MainWindow::activate(const QByteArray &activationToken)
+{
+    if (!activationToken.isEmpty()) {
+        // Qt's Wayland platform uses this for the next activation request.
+        qputenv("XDG_ACTIVATION_TOKEN", activationToken);
+    }
+    setWindowState(windowState() & ~Qt::WindowMinimized);
+    show();
+    raise();
+    activateWindow();
+}
+
 void MainWindow::openDialog()
 {
     QString dir;

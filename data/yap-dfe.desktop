@@ -6,5 +6,6 @@ Comment=Yet Another P-DF Editor
 Exec=yap-dfe %F
 Icon=application-pdf
 Terminal=false
+StartupNotify=true
 Categories=Office;Viewer;Qt;
 MimeType=application/pdf;

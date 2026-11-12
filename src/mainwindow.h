@@ -28,6 +28,11 @@ public:
     // pane: 0 = left, 1 = right, -1 = the active one.
     bool openFile(const QString &path, int pane = -1);
     void openFiles(const QStringList &paths, int pane = -1);
+    // What a launch asks for: the files as tabs in the active pane; with
+    // `split`, the last one in the right pane (a single file in both).
+    void openRequest(const QStringList &paths, bool split);
+    // Brings the window to the front on behalf of another launch.
+    void activate(const QByteArray &activationToken);
     void toggleSplit();
     bool isRendering() const;
 

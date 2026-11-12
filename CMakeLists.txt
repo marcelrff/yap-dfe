@@ -10,7 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Concurrent)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Concurrent Network)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(POPPLER_QT6 REQUIRED IMPORTED_TARGET poppler-qt6)
 
@@ -25,10 +25,12 @@ add_library(yapdfe_core STATIC
     src/tabpane.h
     src/mainwindow.cpp
     src/mainwindow.h
+    src/singleinstance.cpp
+    src/singleinstance.h
 )
 target_include_directories(yapdfe_core PUBLIC src)
 target_compile_options(yapdfe_core PUBLIC -Wall -Wextra)
-target_link_libraries(yapdfe_core PUBLIC Qt6::Widgets Qt6::Concurrent PRIVATE PkgConfig::POPPLER_QT6)
+target_link_libraries(yapdfe_core PUBLIC Qt6::Widgets Qt6::Concurrent PRIVATE Qt6::Network PkgConfig::POPPLER_QT6)
 
 add_executable(yapdfe src/main.cpp)
 set_target_properties(yapdfe PROPERTIES OUTPUT_NAME "yap-dfe")
