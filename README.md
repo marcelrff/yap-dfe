@@ -34,11 +34,21 @@ ctest --test-dir build                        # offscreen smoke test
 | Find | Ctrl+F (searches for the selected text, if any) |
 | Next / previous match | Enter / Shift+Enter in the find bar, F3 / Shift+F3 |
 | Dark mode | Ctrl+D |
+| Dark pages in dark mode on/off | Ctrl+Shift+D |
 
 Search covers the whole document, ignores case unless "Match case" is ticked,
 and finds words hyphenated across a line end. Dark mode inverts page
 lightness but keeps colours, darkens the interface, and is remembered; the
-first start follows the desktop's colour scheme.
+first start follows the desktop's colour scheme. With "Dark Pages in Dark
+Mode" switched off (View menu), dark mode only darkens the interface and
+leaves the document as it is.
+
+Drag a tab out of its tab bar to move it: onto the other pane, onto a tab
+there to take its place, or onto the right half of an unsplit window to
+split it.
+
+Started without files, the last window's tabs, split and reading positions
+come back. File ▸ Restore Tabs on Startup switches that off.
 
 ### Annotating
 

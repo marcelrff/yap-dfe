@@ -14,6 +14,9 @@
 #include <QPlainTextEdit>
 #include <QPainter>
 #include <QDir>
+#include <QDrag>
+#include <QDragEnterEvent>
+#include <QMimeData>
 #include <QMessageBox>
 #include <QPdfWriter>
 #include <QProcess>
@@ -732,6 +735,182 @@ private Q_SLOTS:
         }
         Fixture f;
         QVERIFY(!f.window.darkMode());
+    }
+
+    void darkModeWithoutDarkPages()
+    {
+        Fixture f;
+        f.window.openFile(m_a);
+        PdfView *v = f.left->currentView();
+        QAction *pages = action(f.window, QStringLiteral("Dark Pages in Dark Mode"));
+        QVERIFY(pages->isChecked()); // default: pages go dark too
+
+        // Option off: dark interface, untouched document.
+        pages->trigger();
+        trigger(f.window, QStringLiteral("Dark Mode"));
+        QTRY_VERIFY(!f.window.isRendering());
+        QVERIFY(f.window.palette().color(QPalette::Window).lightness() < 80);
+        QCOMPARE(colorAtText(v, 0), QColor(Qt::white));
+        QVERIFY(!v->darkMode());
+
+        // Switching the option while in dark mode applies at once.
+        pages->trigger();
+        QTRY_VERIFY(!f.window.isRendering());
+        QVERIFY(colorAtText(v, 0).lightness() < 40);
+        pages->trigger();
+        QTRY_VERIFY(!f.window.isRendering());
+        QCOMPARE(colorAtText(v, 0), QColor(Qt::white));
+
+        // The choice is remembered.
+        {
+            Fixture again;
+            QVERIFY(again.window.darkMode());
+            QVERIFY(!action(again.window, QStringLiteral("Dark Pages in Dark Mode"))->isChecked());
+            again.window.openFile(m_b);
+            QVERIFY(!again.left->currentView()->darkMode());
+            action(again.window, QStringLiteral("Dark Pages in Dark Mode"))->trigger();
+            trigger(again.window, QStringLiteral("Dark Mode"));
+        }
+    }
+
+    void tabDragBetweenPanes()
+    {
+        Fixture f;
+        f.window.openFiles({m_a, m_b});
+        const QString mimeType = QString::fromLatin1(TabPane::tabMimeType());
+
+        // Dragging a tab out of the bar starts a drag that names the tab.
+        QByteArray dragged;
+        const auto savedExec = TabPane::execDrag;
+        TabPane::execDrag = [&](QDrag *drag) {
+            dragged = drag->mimeData()->data(mimeType);
+            delete drag;
+        };
+        QTabBar *bar = f.left->tabBar();
+        const QPoint onTab = bar->tabRect(1).center();
+        QTest::mousePress(bar, Qt::LeftButton, {}, onTab);
+        // QTest's own move helper sends no button state, which a drag needs.
+        const auto move = [bar](const QPoint &pos) {
+            QMouseEvent event(QEvent::MouseMove, pos, bar->mapToGlobal(pos), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(bar, &event);
+        };
+        move(onTab + QPoint(5, 0)); // inside the bar: Qt's reordering, no drag
+        QVERIFY(dragged.isEmpty());
+        move(onTab + QPoint(40, 200));
+        QCOMPARE(dragged, QByteArray("leftPane:1"));
+        TabPane::execDrag = savedExec;
+
+        const auto drop = [&](const QByteArray &payload, const QPoint &pos) {
+            QMimeData mime;
+            mime.setData(mimeType, payload);
+            QDragEnterEvent enter(QPointF(pos), Qt::MoveAction, &mime, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(&f.window, &enter);
+            QDragMoveEvent moveEvent(QPointF(pos), Qt::MoveAction, &mime, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(&f.window, &moveEvent);
+            const bool accepted = moveEvent.isAccepted();
+            QDropEvent dropEvent(QPointF(pos), Qt::MoveAction, &mime, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(&f.window, &dropEvent);
+            return accepted;
+        };
+        const auto inWindow = [&](QWidget *w, const QPoint &p) {
+            return w->mapTo(&f.window, p);
+        };
+
+        // Dropping on the tab's own half does nothing.
+        QVERIFY(!drop("leftPane:1", inWindow(f.left, QPoint(50, 300))));
+        QCOMPARE(f.left->count(), 2);
+
+        // Dropping on the right half of an unsplit window creates the split.
+        QVERIFY(drop("leftPane:1", inWindow(f.left, QPoint(f.left->width() - 50, 300))));
+        QCOMPARE(f.left->count(), 1);
+        QCOMPARE(f.right->count(), 1);
+        QVERIFY(f.right->isVisible());
+        QCOMPARE(f.right->currentView()->document()->fileName(), QStringLiteral("b.pdf"));
+
+        // Dropping onto a tab in the other pane takes that tab's place.
+        f.window.openFile(m_a, 1); // right: b, a
+        QCOMPARE(f.right->count(), 2);
+        QVERIFY(drop("rightPane:1", inWindow(f.left->tabBar(), f.left->tabBar()->tabRect(0).center())));
+        QCOMPARE(f.left->count(), 2);
+        QCOMPARE(f.right->count(), 1);
+        QCOMPARE(f.left->currentIndex(), 0); // inserted in front, and shown
+
+        // Dropping below the tabs appends.
+        QVERIFY(drop("rightPane:0", inWindow(f.left, QPoint(60, 300))));
+        QCOMPARE(f.left->count(), 3);
+        QCOMPARE(f.left->currentIndex(), 2);
+        QVERIFY(!f.right->isVisible());
+
+        // The only tab of an unsplit window has nowhere to go; junk is ignored.
+        f.window.unsavedPrompt = [](const QString &) { return QMessageBox::Discard; };
+        trigger(f.window, QStringLiteral("Close Tab"));
+        trigger(f.window, QStringLiteral("Close Tab"));
+        QVERIFY(!drop("leftPane:0", inWindow(f.left, QPoint(f.left->width() - 50, 300))));
+        QVERIFY(!drop("leftPane:7", inWindow(f.left, QPoint(f.left->width() - 50, 300))));
+        QVERIFY(!drop("nonsense", inWindow(f.left, QPoint(f.left->width() - 50, 300))));
+        QCOMPARE(f.left->count(), 1);
+    }
+
+    void sessionRestore()
+    {
+        const QString gone = m_dir.filePath(QStringLiteral("gone.pdf"));
+        QVERIFY(QFile::copy(m_b, gone));
+        {
+            Fixture f;
+            f.window.restoreSession(); // nothing saved yet
+            QCOMPARE(f.left->count(), 0);
+
+            f.window.openFiles({m_a, m_b, gone});
+            f.left->setCurrentIndex(0);
+            f.left->currentView()->goToPage(4);
+            trigger(f.window, QStringLiteral("Split View")); // a.pdf on the right too
+            PdfView *right = f.right->currentView();
+            right->setZoom(2.0);
+            right->goToPage(2);
+            f.left->setCurrentIndex(1);
+            QVERIFY(f.window.close());
+        }
+        QVERIFY(QFile::remove(gone));
+        {
+            Fixture f;
+            f.window.restoreSession();
+            // Same tabs in the same panes; the deleted file is left out.
+            QCOMPARE(f.left->count(), 2);
+            QCOMPARE(f.right->count(), 1);
+            QVERIFY(f.right->isVisible());
+            QCOMPARE(f.left->tabText(0), QStringLiteral("a.pdf"));
+            QCOMPARE(f.left->tabText(1), QStringLiteral("b.pdf"));
+            QCOMPARE(f.left->currentIndex(), 1);
+            // Positions and zoom come back.
+            QCOMPARE(f.left->view(0)->currentPage(), 4);
+            QCOMPARE(f.left->view(0)->zoomMode(), PdfView::ZoomMode::FitWidth);
+            const PdfView *right = f.right->currentView();
+            QCOMPARE(right->document()->fileName(), QStringLiteral("a.pdf"));
+            QCOMPARE(right->zoomMode(), PdfView::ZoomMode::Custom);
+            QCOMPARE(right->zoom(), 2.0);
+            QCOMPARE(right->currentPage(), 2);
+            QCOMPARE(right->document(), f.left->view(0)->document()); // one shared document
+            QTRY_VERIFY(!f.window.isRendering());
+            QCOMPARE(f.left->view(0)->currentPage(), 4); // still there once laid out and shown
+
+            // Switched off: the next start is empty.
+            trigger(f.window, QStringLiteral("Restore Tabs on Startup"));
+            QVERIFY(f.window.close());
+        }
+        {
+            Fixture f;
+            f.window.restoreSession();
+            QCOMPARE(f.left->count(), 0);
+            trigger(f.window, QStringLiteral("Restore Tabs on Startup"));
+        }
+        // An empty window closing leaves an empty session.
+        {
+            Fixture f;
+            QVERIFY(f.window.close());
+        }
+        Fixture f;
+        f.window.restoreSession();
+        QCOMPARE(f.left->count(), 0);
     }
 };
 

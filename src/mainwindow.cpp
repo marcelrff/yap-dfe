@@ -11,6 +11,8 @@
 #include <QDragEnterEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QRubberBand>
+#include <QTabBar>
 #include <QSettings>
 #include <QStyleHints>
 #include <QToolBar>
@@ -18,6 +20,9 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
@@ -230,6 +235,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Dark mode is remembered; the first start follows the desktop's scheme.
     const bool systemDark = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+    m_darkPages = appSettings().value(QStringLiteral("darkPages"), true).toBool();
+    m_darkPagesAction->setChecked(m_darkPages);
+    m_restoreAction->setChecked(appSettings().value(QStringLiteral("restoreSession"), true).toBool());
     setDarkMode(appSettings().value(QStringLiteral("darkMode"), systemDark).toBool());
     updateUi();
 }
@@ -258,6 +266,10 @@ void MainWindow::createActions()
         closeTab(m_active, m_panes[m_active]->currentIndex());
     });
     file->addSeparator();
+    m_restoreAction = add(file, tr("&Restore Tabs on Startup"), {}, [this] {
+        appSettings().setValue(QStringLiteral("restoreSession"), m_restoreAction->isChecked());
+    });
+    m_restoreAction->setCheckable(true);
     add(file, tr("&Quit"), {QKeySequence(Qt::CTRL | Qt::Key_Q)}, [this] { close(); });
 
     QMenu *edit = menuBar()->addMenu(tr("&Edit"));
@@ -288,6 +300,12 @@ void MainWindow::createActions()
     view->addSeparator();
     m_darkAction = add(view, tr("&Dark Mode"), {QKeySequence(Qt::CTRL | Qt::Key_D)}, [this] { setDarkMode(!m_dark); });
     m_darkAction->setCheckable(true);
+    m_darkPagesAction = add(view, tr("Dark P&ages in Dark Mode"), {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D)}, [this] {
+        m_darkPages = m_darkPagesAction->isChecked();
+        appSettings().setValue(QStringLiteral("darkPages"), m_darkPages);
+        applyDarkPages();
+    });
+    m_darkPagesAction->setCheckable(true);
     view->addSeparator();
     m_splitAction = add(view, tr("&Split View"), {QKeySequence(Qt::Key_F8)}, [this] { toggleSplit(); });
     m_splitAction->setCheckable(true);
@@ -372,14 +390,21 @@ void MainWindow::setDarkMode(bool dark)
 {
     m_dark = dark;
     QApplication::setPalette(dark ? darkPalette() : m_lightPalette);
-    for (const TabPane *pane : m_panes) {
-        for (int i = 0; i < pane->count(); ++i) {
-            pane->view(i)->setDarkMode(dark);
-        }
-    }
+    applyDarkPages();
     updateToolIcons();
     m_darkAction->setChecked(dark);
     appSettings().setValue(QStringLiteral("darkMode"), dark);
+}
+
+// Pages are darkened only if dark mode is on and the user wants that; with
+// the option off, dark mode leaves the document as it is.
+void MainWindow::applyDarkPages()
+{
+    for (const TabPane *pane : m_panes) {
+        for (int i = 0; i < pane->count(); ++i) {
+            pane->view(i)->setDarkMode(m_dark && m_darkPages);
+        }
+    }
 }
 
 void MainWindow::openFind()
@@ -511,7 +536,103 @@ void MainWindow::closeEvent(QCloseEvent *event)
             }
         }
     }
+    saveSession();
     event->accept();
+}
+
+// --- session -------------------------------------------------------------------
+
+void MainWindow::saveSession()
+{
+    QJsonArray panes;
+    for (const TabPane *pane : m_panes) {
+        QJsonArray tabs;
+        for (int i = 0; i < pane->count(); ++i) {
+            const PdfView *view = pane->view(i);
+            const PdfView::ViewState state = view->viewState();
+            tabs.append(QJsonObject{
+                {QStringLiteral("path"), view->document()->path()},
+                {QStringLiteral("mode"), int(state.mode)},
+                {QStringLiteral("zoom"), state.zoom},
+                {QStringLiteral("page"), state.page},
+                {QStringLiteral("fx"), state.fx},
+                {QStringLiteral("fy"), state.fy},
+            });
+        }
+        panes.append(QJsonObject{{QStringLiteral("tabs"), tabs}, {QStringLiteral("current"), pane->currentIndex()}});
+    }
+    QJsonArray sizes;
+    for (const int size : m_splitter->sizes()) {
+        sizes.append(size);
+    }
+    const QJsonObject session{{QStringLiteral("panes"), panes}, {QStringLiteral("active"), m_active}, {QStringLiteral("sizes"), sizes}};
+
+    QSettings settings = appSettings();
+    settings.setValue(QStringLiteral("session"), QString::fromUtf8(QJsonDocument(session).toJson(QJsonDocument::Compact)));
+    settings.setValue(QStringLiteral("geometry"), saveGeometry());
+}
+
+void MainWindow::restoreSession()
+{
+    QSettings settings = appSettings();
+    if (!settings.value(QStringLiteral("restoreSession"), true).toBool()) {
+        return;
+    }
+    restoreGeometry(settings.value(QStringLiteral("geometry")).toByteArray());
+    const QJsonObject session = QJsonDocument::fromJson(settings.value(QStringLiteral("session")).toString().toUtf8()).object();
+    const QJsonArray panes = session.value(QStringLiteral("panes")).toArray();
+
+    std::array<PdfView *, 2> current{};
+    for (int p = 0; p < 2 && p < panes.size(); ++p) {
+        const QJsonObject pane = panes.at(p).toObject();
+        const QJsonArray tabs = pane.value(QStringLiteral("tabs")).toArray();
+        for (int t = 0; t < tabs.size(); ++t) {
+            const QJsonObject tab = tabs.at(t).toObject();
+            const QString path = tab.value(QStringLiteral("path")).toString();
+            // Files that have gone away since are skipped without fuss.
+            if (!QFileInfo::exists(path) || !openFile(path, p)) {
+                continue;
+            }
+            // With an empty left pane the tab ends up there instead.
+            PdfView *view = nullptr;
+            for (const TabPane *candidate : {m_panes[p], m_panes[1 - p]}) {
+                const int index = candidate->indexOfPath(QFileInfo(path).absoluteFilePath());
+                if (index >= 0) {
+                    view = candidate->view(index);
+                    break;
+                }
+            }
+            if (!view) {
+                continue;
+            }
+            PdfView::ViewState state;
+            state.mode = PdfView::ZoomMode(std::clamp(tab.value(QStringLiteral("mode")).toInt(1), 0, 2));
+            state.zoom = tab.value(QStringLiteral("zoom")).toDouble(1.0);
+            state.page = tab.value(QStringLiteral("page")).toInt();
+            state.fx = tab.value(QStringLiteral("fx")).toDouble();
+            state.fy = tab.value(QStringLiteral("fy")).toDouble();
+            view->restoreViewState(state);
+            if (t == pane.value(QStringLiteral("current")).toInt()) {
+                current[p] = view;
+            }
+        }
+    }
+    for (PdfView *view : current) {
+        for (TabPane *pane : m_panes) {
+            if (view && pane->indexOf(view) >= 0) {
+                pane->setCurrentWidget(view);
+            }
+        }
+    }
+    const QJsonArray sizes = session.value(QStringLiteral("sizes")).toArray();
+    if (isSplit() && sizes.size() == 2 && sizes.at(0).toInt() > 0 && sizes.at(1).toInt() > 0) {
+        m_splitter->setSizes({sizes.at(0).toInt(), sizes.at(1).toInt()});
+    }
+    setActivePane(session.value(QStringLiteral("active")).toInt());
+    if (PdfView *view = currentView()) {
+        view->setFocus();
+    }
+    updateUi();
 }
 
 // --- opening ---------------------------------------------------------------
@@ -592,7 +713,7 @@ void MainWindow::openDialog()
     openFiles(files);
 }
 
-void MainWindow::addView(PdfView *view, int pane)
+void MainWindow::addView(PdfView *view, int pane, int insertAt)
 {
     // Moving a tab between panes comes through here again; connect only once.
     if (!view->property("connected").toBool()) {
@@ -602,7 +723,7 @@ void MainWindow::addView(PdfView *view, int pane)
         connect(view, &PdfView::zoomChanged, this, &MainWindow::updateUi);
         connect(view, &PdfView::selectionChanged, this, &MainWindow::updateUi);
         connect(view, &PdfView::searchChanged, this, &MainWindow::updateUi);
-        view->setDarkMode(m_dark);
+        view->setDarkMode(m_dark && m_darkPages);
         connect(view, &PdfView::toolFinished, this, [this] {
             setTool(PdfView::Tool::Select, QColor());
         });
@@ -614,7 +735,7 @@ void MainWindow::addView(PdfView *view, int pane)
     }
 
     const bool wasSplit = isSplit();
-    const int index = m_panes[pane]->addView(view);
+    const int index = m_panes[pane]->addView(view, insertAt);
     m_panes[pane]->setCurrentIndex(index);
     normalizePanes();
     if (!wasSplit && isSplit()) {
@@ -662,7 +783,7 @@ void MainWindow::closeTab(int pane, int index)
     updateUi();
 }
 
-void MainWindow::moveTab(int fromPane, int index)
+void MainWindow::moveTab(int fromPane, int index, int insertAt)
 {
     PdfView *view = m_panes[fromPane]->view(index);
     if (!view) {
@@ -673,7 +794,7 @@ void MainWindow::moveTab(int fromPane, int index)
         return;
     }
     m_panes[fromPane]->removeTab(index);
-    addView(view, 1 - fromPane);
+    addView(view, 1 - fromPane, insertAt);
 }
 
 void MainWindow::duplicateTab(int fromPane, int index)
@@ -874,16 +995,91 @@ void MainWindow::updateUi()
 
 // --- drag and drop ---------------------------------------------------------
 
+// Works out what dropping a dragged tab at `pos` would do. Returns false if
+// it would do nothing (dropped on its own pane, or it is the only tab).
+bool MainWindow::tabDropTarget(const QMimeData *mime, const QPoint &pos, int *fromPane, int *index, int *toPane, int *insertAt,
+                               QRect *area) const
+{
+    const QList<QByteArray> parts = mime->data(QString::fromLatin1(TabPane::tabMimeType())).split(':');
+    if (parts.size() != 2) {
+        return false;
+    }
+    *fromPane = parts.at(0) == m_panes[1]->objectName().toUtf8() ? 1 : 0;
+    *index = parts.at(1).toInt();
+    if (!m_panes[*fromPane]->view(*index)) {
+        return false;
+    }
+
+    // In a split window the pane under the pointer is the target. Otherwise
+    // the right half of the window stands for the pane that would be created.
+    const QRect splitterRect(m_splitter->mapTo(this, QPoint(0, 0)), m_splitter->size());
+    QRect left = splitterRect, right = splitterRect;
+    if (isSplit()) {
+        left = QRect(m_wrappers[0]->mapTo(this, QPoint(0, 0)), m_wrappers[0]->size());
+        right = QRect(m_wrappers[1]->mapTo(this, QPoint(0, 0)), m_wrappers[1]->size());
+    } else {
+        left.setWidth(splitterRect.width() / 2);
+        right.setLeft(left.right() + 1);
+    }
+    *toPane = right.contains(pos) ? 1 : 0;
+    *area = *toPane == 1 ? right : left;
+    if (*toPane == *fromPane || !splitterRect.contains(pos) || (!isSplit() && m_panes[0]->count() < 2)) {
+        return false;
+    }
+
+    // Dropped on a tab: take that tab's place. Anywhere else: go to the end.
+    const QTabBar *bar = m_panes[*toPane]->tabBar();
+    *insertAt = bar->isVisible() ? bar->tabAt(bar->mapFrom(this, pos)) : -1;
+    return true;
+}
+
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 {
-    if (event->mimeData()->hasUrls()) {
+    if (event->mimeData()->hasUrls() || event->mimeData()->hasFormat(QString::fromLatin1(TabPane::tabMimeType()))) {
         event->acceptProposedAction();
+    }
+}
+
+void MainWindow::dragMoveEvent(QDragMoveEvent *event)
+{
+    if (!event->mimeData()->hasFormat(QString::fromLatin1(TabPane::tabMimeType()))) {
+        event->acceptProposedAction();
+        return;
+    }
+    int from, index, to, at;
+    QRect area;
+    const bool ok = tabDropTarget(event->mimeData(), event->position().toPoint(), &from, &index, &to, &at, &area);
+    if (!m_dropIndicator) {
+        m_dropIndicator = new QRubberBand(QRubberBand::Rectangle, this);
+    }
+    // Show where the tab would land.
+    m_dropIndicator->setGeometry(area);
+    m_dropIndicator->setVisible(ok);
+    event->setAccepted(ok);
+}
+
+void MainWindow::dragLeaveEvent(QDragLeaveEvent *)
+{
+    if (m_dropIndicator) {
+        m_dropIndicator->hide();
     }
 }
 
 void MainWindow::dropEvent(QDropEvent *event)
 {
-    // Dropping on the right half of a split window opens there.
+    if (m_dropIndicator) {
+        m_dropIndicator->hide();
+    }
+    if (event->mimeData()->hasFormat(QString::fromLatin1(TabPane::tabMimeType()))) {
+        int from, index, to, at;
+        QRect area;
+        if (tabDropTarget(event->mimeData(), event->position().toPoint(), &from, &index, &to, &at, &area)) {
+            moveTab(from, index, at);
+            event->acceptProposedAction();
+        }
+        return;
+    }
+    // Dropping files on the right half of a split window opens them there.
     int pane = m_active;
     if (isSplit()) {
         pane = m_wrappers[1]->geometry().contains(m_splitter->mapFrom(this, event->position().toPoint())) ? 1 : 0;

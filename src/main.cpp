@@ -31,7 +31,10 @@ int main(int argc, char *argv[])
     MainWindow window;
     QStringList files = parser.positionalArguments();
     const bool split = parser.isSet(splitOption);
-    if (split && files.size() > 1) {
+    if (files.isEmpty()) {
+        // Started without files: pick up where the last window left off.
+        window.restoreSession();
+    } else if (split && files.size() > 1) {
         const QString right = files.takeLast();
         window.openFiles(files, 0);
         window.openFile(right, 1);

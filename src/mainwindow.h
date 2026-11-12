@@ -13,6 +13,8 @@ class FindBar;
 class QAction;
 class QFrame;
 class QLabel;
+class QMimeData;
+class QRubberBand;
 class QSplitter;
 class TabPane;
 
@@ -34,6 +36,10 @@ public:
     bool darkMode() const { return m_dark; }
     void setDarkMode(bool dark);
 
+    // Reopens the tabs, split and positions saved when the window last
+    // closed. Does nothing if the user switched that off.
+    void restoreSession();
+
     // Asked before a document with unsaved changes is closed; answers Save,
     // Discard or Cancel. Replaceable so tests can answer without a dialog.
     std::function<QMessageBox::StandardButton(const QString &fileName)> unsavedPrompt;
@@ -41,6 +47,8 @@ public:
 protected:
     void closeEvent(QCloseEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dragLeaveEvent(QDragLeaveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 
 private:
@@ -57,14 +65,17 @@ private:
     int viewCount(const std::shared_ptr<Document> &doc) const;
     void openDialog();
     void closeTab(int pane, int index);
-    void moveTab(int fromPane, int index);
+    void moveTab(int fromPane, int index, int insertAt = -1);
+    bool tabDropTarget(const QMimeData *mime, const QPoint &pos, int *fromPane, int *index, int *toPane, int *insertAt, QRect *area) const;
+    void saveSession();
+    void applyDarkPages();
     void duplicateTab(int fromPane, int index);
     void showTabMenu(int pane, int index, const QPoint &globalPos);
     void switchTab(int delta);
     void focusOtherPane();
     void goToPageDialog();
     void setActivePane(int pane);
-    void addView(PdfView *view, int pane);
+    void addView(PdfView *view, int pane, int insertAt = -1);
     void normalizePanes();
     void updateUi();
 
@@ -83,6 +94,10 @@ private:
     bool m_dark = false;
     QPalette m_lightPalette; // the palette the application started with
     QAction *m_darkAction = nullptr;
+    bool m_darkPages = true; // in dark mode, darken the pages too
+    QAction *m_darkPagesAction = nullptr;
+    QAction *m_restoreAction = nullptr;
+    QRubberBand *m_dropIndicator = nullptr;
 
     QLabel *m_pageLabel = nullptr;
     QLabel *m_zoomLabel = nullptr;
