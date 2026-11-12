@@ -3,6 +3,7 @@
 #include "document.h"
 #include "findbar.h"
 #include "pdfview.h"
+#include "startpage.h"
 #include "tabpane.h"
 
 #include <QActionGroup>
@@ -12,6 +13,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QRubberBand>
+#include <QScopeGuard>
 #include <QTabBar>
 #include <QSettings>
 #include <QStyleHints>
@@ -37,6 +39,8 @@ QSettings appSettings()
 {
     return QSettings(QStringLiteral("yap-dfe"), QStringLiteral("yap-dfe"));
 }
+
+const int kMaxRecentFiles = 10;
 
 QPalette darkPalette()
 {
@@ -186,6 +190,12 @@ MainWindow::MainWindow(QWidget *parent)
         m_indicators[i] = indicator;
     }
     m_wrappers[1]->hide();
+    m_startPage = new StartPage;
+    m_startPage->setObjectName(QStringLiteral("startPage"));
+    m_panes[0]->setEmptyWidget(m_startPage);
+    connect(m_startPage, &StartPage::openRequested, this, [this](const QString &path) {
+        openFile(path);
+    });
     auto *central = new QWidget(this);
     auto *centralLayout = new QVBoxLayout(central);
     centralLayout->setContentsMargins(0, 0, 0, 0);
@@ -239,6 +249,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_darkPagesAction->setChecked(m_darkPages);
     m_restoreAction->setChecked(appSettings().value(QStringLiteral("restoreSession"), true).toBool());
     setDarkMode(appSettings().value(QStringLiteral("darkMode"), systemDark).toBool());
+    setRecentFiles(recentFiles());
     updateUi();
 }
 
@@ -259,6 +270,11 @@ void MainWindow::createActions()
 
     QMenu *file = menuBar()->addMenu(tr("&File"));
     add(file, tr("&Open…"), {QKeySequence::Open, QKeySequence(Qt::CTRL | Qt::Key_T)}, [this] { openDialog(); });
+    m_recentMenu = file->addMenu(tr("Open &Recent"));
+    m_recentMenu->setObjectName(QStringLiteral("recentMenu"));
+    m_recentMenu->setToolTipsVisible(true);
+    // Filled each time it opens: files come and go behind our back.
+    connect(m_recentMenu, &QMenu::aboutToShow, this, &MainWindow::fillRecentMenu);
     m_saveAction = add(file, tr("&Save"), {QKeySequence::Save}, withView([this](PdfView *v) { saveDocument(v->document()); }));
     m_viewActions << add(file, tr("Save &As…"), {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S)}, [this] { saveAs(); });
     file->addSeparator();
@@ -490,7 +506,9 @@ void MainWindow::saveAs()
     QString error;
     if (!doc->save(path, &error)) {
         QMessageBox::warning(this, tr("Cannot save"), error);
+        return;
     }
+    noteRecentFile(doc->path());
 }
 
 int MainWindow::viewCount(const std::shared_ptr<Document> &doc) const
@@ -579,6 +597,8 @@ void MainWindow::restoreSession()
         return;
     }
     restoreGeometry(settings.value(QStringLiteral("geometry")).toByteArray());
+    m_restoring = true;
+    const auto done = qScopeGuard([this] { m_restoring = false; });
     const QJsonObject session = QJsonDocument::fromJson(settings.value(QStringLiteral("session")).toString().toUtf8()).object();
     const QJsonArray panes = session.value(QStringLiteral("panes")).toArray();
 
@@ -693,7 +713,63 @@ bool MainWindow::openFile(const QString &path, int pane)
         return false;
     }
     addView(new PdfView(doc), pane);
+    noteRecentFile(absolute);
     return true;
+}
+
+// --- recent files ------------------------------------------------------------
+
+// Newest first. Files that are missing right now are left out but not
+// forgotten: they may be on a drive that is not plugged in.
+QStringList MainWindow::recentFiles() const
+{
+    QStringList present;
+    for (const QString &path : appSettings().value(QStringLiteral("recentFiles")).toStringList()) {
+        if (QFileInfo::exists(path)) {
+            present << path;
+        }
+    }
+    return present;
+}
+
+void MainWindow::setRecentFiles(const QStringList &paths)
+{
+    appSettings().setValue(QStringLiteral("recentFiles"), paths);
+    m_startPage->setRecentFiles(recentFiles());
+    m_recentMenu->setEnabled(!paths.isEmpty());
+}
+
+void MainWindow::noteRecentFile(const QString &path)
+{
+    if (m_restoring) {
+        return;
+    }
+    QStringList paths = appSettings().value(QStringLiteral("recentFiles")).toStringList();
+    paths.removeAll(path);
+    paths.prepend(path);
+    setRecentFiles(paths.mid(0, kMaxRecentFiles));
+}
+
+void MainWindow::fillRecentMenu()
+{
+    m_recentMenu->clear();
+    const QStringList paths = recentFiles();
+    for (const QString &path : paths) {
+        const QFileInfo info(path);
+        // "&" would otherwise be read as a keyboard mnemonic.
+        const QString label = QStringLiteral("%1  —  %2").arg(info.fileName(), StartPage::displayPath(info.absolutePath()));
+        QAction *action = m_recentMenu->addAction(QString(label).replace(QLatin1Char('&'), QStringLiteral("&&")), this, [this, path] {
+            openFile(path);
+        });
+        action->setToolTip(path);
+    }
+    if (paths.isEmpty()) {
+        m_recentMenu->addAction(tr("No recent files"))->setEnabled(false);
+    }
+    m_recentMenu->addSeparator();
+    m_recentMenu->addAction(tr("&Clear List"), this, [this] {
+        setRecentFiles({});
+    });
 }
 
 void MainWindow::openFiles(const QStringList &paths, int pane)

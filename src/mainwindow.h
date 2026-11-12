@@ -13,9 +13,11 @@ class FindBar;
 class QAction;
 class QFrame;
 class QLabel;
+class QMenu;
 class QMimeData;
 class QRubberBand;
 class QSplitter;
+class StartPage;
 class TabPane;
 
 class MainWindow : public QMainWindow
@@ -69,6 +71,10 @@ private:
     bool confirmClose(const std::shared_ptr<Document> &doc);
     int viewCount(const std::shared_ptr<Document> &doc) const;
     void openDialog();
+    QStringList recentFiles() const;
+    void setRecentFiles(const QStringList &paths);
+    void noteRecentFile(const QString &path);
+    void fillRecentMenu();
     void closeTab(int pane, int index);
     void moveTab(int fromPane, int index, int insertAt = -1);
     bool tabDropTarget(const QMimeData *mime, const QPoint &pos, int *fromPane, int *index, int *toPane, int *insertAt, QRect *area) const;
@@ -95,6 +101,9 @@ private:
     std::array<QFrame *, 2> m_indicators{};
     int m_active = 0;
 
+    StartPage *m_startPage = nullptr; // fills the left pane while nothing is open
+    QMenu *m_recentMenu = nullptr;
+    bool m_restoring = false; // reopening last session's tabs, which is not "recent" use
     FindBar *m_findBar = nullptr;
     bool m_dark = false;
     QPalette m_lightPalette; // the palette the application started with

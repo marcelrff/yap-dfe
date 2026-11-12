@@ -7,7 +7,6 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPointer>
-#include <QPainter>
 #include <QTabBar>
 
 namespace {
@@ -139,13 +138,35 @@ int TabPane::indexOfPath(const QString &path) const
     return -1;
 }
 
-void TabPane::paintEvent(QPaintEvent *event)
+void TabPane::setEmptyWidget(QWidget *widget)
 {
-    if (count() > 0) {
-        QTabWidget::paintEvent(event);
-        return;
+    m_emptyWidget = widget;
+    widget->setParent(this);
+    widget->setGeometry(rect());
+    widget->setVisible(count() == 0);
+}
+
+void TabPane::resizeEvent(QResizeEvent *event)
+{
+    QTabWidget::resizeEvent(event);
+    if (m_emptyWidget) {
+        m_emptyWidget->setGeometry(rect());
     }
-    QPainter p(this);
-    p.setPen(palette().color(QPalette::PlaceholderText));
-    p.drawText(rect(), Qt::AlignCenter, tr("Open a PDF with Ctrl+O, or drop files here"));
+}
+
+void TabPane::tabInserted(int index)
+{
+    QTabWidget::tabInserted(index);
+    if (m_emptyWidget) {
+        m_emptyWidget->hide();
+    }
+}
+
+void TabPane::tabRemoved(int index)
+{
+    QTabWidget::tabRemoved(index);
+    if (m_emptyWidget && count() == 0) {
+        m_emptyWidget->show();
+        m_emptyWidget->raise();
+    }
 }

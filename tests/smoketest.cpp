@@ -5,12 +5,15 @@
 #include "mainwindow.h"
 #include "pdfview.h"
 #include "singleinstance.h"
+#include "startpage.h"
 #include "tabpane.h"
 
 #include <QAction>
 #include <QCheckBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QMenu>
 #include <QClipboard>
 #include <QPlainTextEdit>
 #include <QPainter>
@@ -970,6 +973,75 @@ private Q_SLOTS:
         Fixture f;
         f.window.restoreSession();
         QCOMPARE(f.left->count(), 0);
+    }
+
+    // Last: it leaves a saved session behind.
+    void recentFiles()
+    {
+        // The texts of the Open Recent entries, as the menu would show them now.
+        const auto entries = [](MainWindow &w) {
+            auto *menu = w.findChild<QMenu *>(QStringLiteral("recentMenu"));
+            Q_EMIT menu->aboutToShow();
+            QStringList names;
+            for (const QAction *a : menu->actions()) {
+                if (a->isSeparator()) {
+                    break;
+                }
+                names << a->text().section(QStringLiteral("  —  "), 0, 0);
+            }
+            return names;
+        };
+        const QString gone = m_dir.filePath(QStringLiteral("recent-gone.pdf"));
+        QVERIFY(QFile::copy(m_b, gone));
+        {
+            Fixture f;
+            auto *menu = f.window.findChild<QMenu *>(QStringLiteral("recentMenu"));
+            Q_EMIT menu->aboutToShow();
+            menu->actions().constLast()->trigger(); // Clear List: earlier tests opened files too
+            QVERIFY(!menu->isEnabled());
+            auto *page = f.window.findChild<StartPage *>();
+            auto *list = page->findChild<QListWidget *>();
+            QVERIFY(page->isVisible());
+            QVERIFY(!list->isVisible());
+
+            // Most recently opened first; opening again moves a file to the top.
+            f.window.openFiles({m_a, gone, m_b});
+            QVERIFY(!page->isVisible());
+            QCOMPARE(entries(f.window), QStringList({QStringLiteral("b.pdf"), QStringLiteral("recent-gone.pdf"), QStringLiteral("a.pdf")}));
+            trigger(f.window, QStringLiteral("Close Tab"));
+            f.window.openFile(m_b);
+            QCOMPARE(entries(f.window).size(), 3);
+            QVERIFY(f.window.close());
+        }
+        QVERIFY(QFile::remove(gone));
+        {
+            // Remembered by the next window; the session's tabs coming back
+            // does not reshuffle the list, and the deleted file is left out.
+            Fixture f;
+            f.window.restoreSession();
+            QCOMPARE(f.left->count(), 2);
+            QCOMPARE(entries(f.window), QStringList({QStringLiteral("b.pdf"), QStringLiteral("a.pdf")}));
+
+            // With every tab closed the start page offers them.
+            trigger(f.window, QStringLiteral("Close Tab"));
+            trigger(f.window, QStringLiteral("Close Tab"));
+            auto *page = f.window.findChild<StartPage *>();
+            auto *list = page->findChild<QListWidget *>();
+            QVERIFY(page->isVisible());
+            QCOMPARE(page->geometry(), f.left->rect());
+            QCOMPARE(list->count(), 2);
+            QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, list->visualItemRect(list->item(1)).center());
+            QCOMPARE(f.left->count(), 1);
+            QCOMPARE(f.left->currentView()->document()->fileName(), QStringLiteral("a.pdf"));
+            QVERIFY(!page->isVisible());
+
+            // And from the menu.
+            auto *menu = f.window.findChild<QMenu *>(QStringLiteral("recentMenu"));
+            QCOMPARE(entries(f.window).first(), QStringLiteral("a.pdf"));
+            menu->actions().at(1)->trigger();
+            QCOMPARE(f.left->count(), 2);
+            QCOMPARE(f.left->currentView()->document()->fileName(), QStringLiteral("b.pdf"));
+        }
     }
 };
 

@@ -27,6 +27,8 @@ add_library(yapdfe_core STATIC
     src/mainwindow.h
     src/singleinstance.cpp
     src/singleinstance.h
+    src/startpage.cpp
+    src/startpage.h
 )
 target_include_directories(yapdfe_core PUBLIC src)
 target_compile_options(yapdfe_core PUBLIC -Wall -Wextra)
