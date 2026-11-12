@@ -198,7 +198,7 @@ private Q_SLOTS:
         // Middle click closes.
         QTest::mouseClick(f.left->tabBar(), Qt::MiddleButton, {}, f.left->tabBar()->tabRect(0).center());
         QCOMPARE(f.left->count(), 0);
-        QCOMPARE(f.window.windowTitle(), QStringLiteral("yap-dfv"));
+        QCOMPARE(f.window.windowTitle(), QStringLiteral("yap-dfe"));
     }
 
     void renderingAndNavigation()

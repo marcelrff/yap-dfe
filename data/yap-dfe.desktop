@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=yap-dfv
-GenericName=PDF Viewer
-Comment=Yet Another P-DF Viewer
-Exec=yap-dfv %F
+Name=yap-dfe
+GenericName=PDF Editor
+Comment=Yet Another P-DF Editor
+Exec=yap-dfe %F
 Icon=application-pdf
 Terminal=false
 Categories=Office;Viewer;Qt;

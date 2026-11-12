@@ -30,7 +30,7 @@
 namespace {
 QSettings appSettings()
 {
-    return QSettings(QStringLiteral("yap-dfv"), QStringLiteral("yap-dfv"));
+    return QSettings(QStringLiteral("yap-dfe"), QStringLiteral("yap-dfe"));
 }
 
 QPalette darkPalette()
@@ -811,8 +811,8 @@ void MainWindow::updateUi()
     const PdfView *v = currentView();
     const bool split = isSplit();
 
-    setWindowTitle(v ? tr("%1%2 — yap-dfv").arg(v->document()->fileName(), v->document()->isModified() ? QStringLiteral(" *") : QString())
-                     : tr("yap-dfv"));
+    setWindowTitle(v ? tr("%1%2 — yap-dfe").arg(v->document()->fileName(), v->document()->isModified() ? QStringLiteral(" *") : QString())
+                     : tr("yap-dfe"));
     m_pageLabel->setText(v ? tr("Page %1 of %2").arg(v->currentPage() + 1).arg(v->pageCount()) : QString());
     m_zoomLabel->setText(v ? tr("%1 %").arg(qRound(v->zoom() * 100)) : QString());
 

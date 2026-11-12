@@ -1,6 +1,6 @@
-# yap-dfv
+# yap-dfe
 
-Yet Another P-DF Viewer: tabbed, with side-by-side panes in one window,
+Yet Another P-DF Editor: tabbed, with side-by-side panes in one window,
 annotations, search and a dark mode.
 C++20, Qt 6, Poppler.
 
@@ -11,8 +11,8 @@ Needs `qt6-base`, `poppler-qt6`, `cmake` and `ninja` (Arch package names).
 ```sh
 cmake -S . -B build -G Ninja
 cmake --build build
-./build/yap-dfv file1.pdf file2.pdf          # one tab per file
-./build/yap-dfv --split left.pdf right.pdf   # start side by side
+./build/yap-dfe file1.pdf file2.pdf          # one tab per file
+./build/yap-dfe --split left.pdf right.pdf   # start side by side
 ctest --test-dir build                        # offscreen smoke test
 ```
 

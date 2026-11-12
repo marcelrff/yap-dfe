@@ -19,7 +19,7 @@ const QSet<Poppler::Annotation::SubType> SupportedTypes{Poppler::Annotation::ATe
 
 QString newId()
 {
-    return QStringLiteral("yapdfv-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    return QStringLiteral("yapdfe-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
 Poppler::HighlightAnnotation::HighlightType toPoppler(AnnotationData::Kind kind)

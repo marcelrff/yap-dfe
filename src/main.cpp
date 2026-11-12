@@ -8,13 +8,13 @@
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-    QApplication::setApplicationName(QStringLiteral("yap-dfv"));
-    QApplication::setApplicationDisplayName(QStringLiteral("yap-dfv"));
+    QApplication::setApplicationName(QStringLiteral("yap-dfe"));
+    QApplication::setApplicationDisplayName(QStringLiteral("yap-dfe"));
     QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
-    QApplication::setDesktopFileName(QStringLiteral("yap-dfv"));
+    QApplication::setDesktopFileName(QStringLiteral("yap-dfe"));
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("Yet Another P-DF Viewer: tabs, side-by-side panes, annotations"));
+    parser.setApplicationDescription(QStringLiteral("Yet Another P-DF Editor: tabs, side-by-side panes, annotations"));
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addPositionalArgument(QStringLiteral("files"), QStringLiteral("PDF files to open, one tab each."), QStringLiteral("[files...]"));
