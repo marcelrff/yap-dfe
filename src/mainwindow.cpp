@@ -6,7 +6,11 @@
 
 #include <QActionGroup>
 #include <QApplication>
+#include <QCloseEvent>
 #include <QDragEnterEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QToolBar>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -20,9 +24,85 @@
 #include <QStatusBar>
 #include <QVBoxLayout>
 
+namespace {
+// Toolbar icons are drawn here so they look the same on every desktop and
+// show the actual marker colours.
+QIcon toolIcon(PdfView::Tool tool, const QColor &color, const QColor &ink)
+{
+    const int size = 64;
+    QPixmap pixmap(size, size);
+    pixmap.fill(Qt::transparent);
+    QPainter p(&pixmap);
+    p.setRenderHint(QPainter::Antialiasing);
+    QFont font = p.font();
+    font.setPixelSize(44);
+    font.setBold(true);
+    p.setFont(font);
+    const QRect box(0, 0, size, size);
+
+    switch (tool) {
+    case PdfView::Tool::Select: {
+        // An arrow pointer.
+        QPainterPath path;
+        path.moveTo(16, 8);
+        path.lineTo(16, 52);
+        path.lineTo(27, 41);
+        path.lineTo(35, 58);
+        path.lineTo(42, 55);
+        path.lineTo(34, 38);
+        path.lineTo(50, 38);
+        path.closeSubpath();
+        p.setPen(QPen(ink, 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(path);
+        break;
+    }
+    case PdfView::Tool::Highlight:
+        p.setPen(Qt::NoPen);
+        p.setBrush(color);
+        p.drawRoundedRect(box.adjusted(4, 10, -4, -10), 8, 8);
+        p.setPen(QColor(30, 30, 30));
+        p.drawText(box, Qt::AlignCenter, QStringLiteral("A"));
+        break;
+    case PdfView::Tool::Underline:
+    case PdfView::Tool::StrikeOut: {
+        p.setPen(ink);
+        p.drawText(box.adjusted(0, -4, 0, -4), Qt::AlignCenter, QStringLiteral("A"));
+        const int y = tool == PdfView::Tool::Underline ? 57 : 30;
+        p.setPen(QPen(color, 5, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(8, y, 56, y);
+        break;
+    }
+    case PdfView::Tool::Note: {
+        // A speech bubble.
+        QPainterPath path;
+        path.addRoundedRect(QRectF(6, 8, 52, 38), 9, 9);
+        path.moveTo(18, 45);
+        path.lineTo(18, 58);
+        path.lineTo(32, 45);
+        p.setPen(QPen(QColor(120, 95, 0), 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(color);
+        p.drawPath(path.simplified());
+        break;
+    }
+    case PdfView::Tool::Text:
+        p.setPen(ink);
+        p.drawText(box, Qt::AlignCenter, QStringLiteral("T"));
+        p.setPen(QPen(ink, 3));
+        p.drawLine(52, 12, 52, 52); // text cursor
+        break;
+    }
+    return QIcon(pixmap);
+}
+}
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+    unsavedPrompt = [this](const QString &fileName) {
+        return QMessageBox::question(this, tr("Unsaved changes"), tr("“%1” has unsaved annotations. Save them before closing?").arg(fileName),
+                                     QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    };
     setAcceptDrops(true);
     resize(1280, 860);
 
@@ -80,6 +160,7 @@ MainWindow::MainWindow(QWidget *parent)
     });
 
     createActions();
+    createToolActions();
     updateUi();
 }
 
@@ -100,11 +181,23 @@ void MainWindow::createActions()
 
     QMenu *file = menuBar()->addMenu(tr("&File"));
     add(file, tr("&Open…"), {QKeySequence::Open, QKeySequence(Qt::CTRL | Qt::Key_T)}, [this] { openDialog(); });
+    m_saveAction = add(file, tr("&Save"), {QKeySequence::Save}, withView([this](PdfView *v) { saveDocument(v->document()); }));
+    m_viewActions << add(file, tr("Save &As…"), {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S)}, [this] { saveAs(); });
+    file->addSeparator();
     m_viewActions << add(file, tr("&Close Tab"), {QKeySequence(Qt::CTRL | Qt::Key_W)}, [this] {
         closeTab(m_active, m_panes[m_active]->currentIndex());
     });
     file->addSeparator();
     add(file, tr("&Quit"), {QKeySequence(Qt::CTRL | Qt::Key_Q)}, [this] { close(); });
+
+    QMenu *edit = menuBar()->addMenu(tr("&Edit"));
+    m_undoAction = add(edit, tr("&Undo"), {QKeySequence::Undo}, withView([](PdfView *v) { v->document()->undoStack()->undo(); }));
+    m_redoAction = add(edit, tr("&Redo"), {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z), QKeySequence(Qt::CTRL | Qt::Key_Y)},
+                       withView([](PdfView *v) { v->document()->undoStack()->redo(); }));
+    edit->addSeparator();
+    m_copyAction = add(edit, tr("&Copy"), {QKeySequence::Copy}, withView([](PdfView *v) { v->copySelection(); }));
+    m_deleteAction = add(edit, tr("&Delete Annotation"), {QKeySequence(Qt::Key_Delete)},
+                         withView([](PdfView *v) { v->deleteSelectedAnnotation(); }));
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     m_viewActions << add(view, tr("Zoom &In"), {QKeySequence(Qt::CTRL | Qt::Key_Plus), QKeySequence(Qt::CTRL | Qt::Key_Equal)},
@@ -137,6 +230,163 @@ void MainWindow::createActions()
     m_viewActions << add(go, tr("&First Page"), {QKeySequence(Qt::CTRL | Qt::Key_Home)}, withView([](PdfView *v) { v->goToPage(0); }));
     m_viewActions << add(go, tr("&Last Page"), {QKeySequence(Qt::CTRL | Qt::Key_End)},
                          withView([](PdfView *v) { v->goToPage(v->pageCount() - 1); }));
+}
+
+// --- tools -------------------------------------------------------------------
+
+void MainWindow::createToolActions()
+{
+    using Tool = PdfView::Tool;
+    struct Def {
+        QString text;
+        Tool tool;
+        QColor color;
+    };
+    QList<Def> defs{{tr("&Select"), Tool::Select, QColor()}};
+    for (const auto &[name, color] : PdfView::highlightColors()) {
+        defs.append({tr("Highlight %1").arg(name), Tool::Highlight, color});
+    }
+    defs.append({tr("&Underline"), Tool::Underline, PdfView::lineColor()});
+    defs.append({tr("Stri&ke Out"), Tool::StrikeOut, PdfView::lineColor()});
+    defs.append({tr("&Comment"), Tool::Note, PdfView::noteColor()});
+    defs.append({tr("&Text"), Tool::Text, QColor(Qt::black)});
+
+    QMenu *menu = new QMenu(tr("&Tools"), this);
+    menuBar()->insertMenu(menuBar()->actions().at(2), menu); // after Edit
+    QToolBar *bar = addToolBar(tr("Tools"));
+    bar->setObjectName(QStringLiteral("toolsBar"));
+    bar->setMovable(false);
+    bar->setIconSize(QSize(22, 22));
+    auto *group = new QActionGroup(this);
+
+    const QColor ink = palette().color(QPalette::WindowText);
+    int number = 1;
+    for (const Def &def : std::as_const(defs)) {
+        // Alt+1 … Alt+9, in toolbar order.
+        const QKeySequence key(Qt::ALT | Qt::Key(Qt::Key_0 + number++));
+        QAction *action = menu->addAction(toolIcon(def.tool, def.color, ink), def.text);
+        action->setShortcut(key);
+        action->setCheckable(true);
+        action->setToolTip(QStringLiteral("%1 (%2)").arg(def.text).remove(QLatin1Char('&')).arg(key.toString(QKeySequence::NativeText)));
+        group->addAction(action);
+        bar->addAction(action);
+        connect(action, &QAction::triggered, this, [this, tool = def.tool, color = def.color] {
+            triggerTool(tool, color);
+        });
+        m_toolActions.append({action, {def.tool, def.color}});
+        if (def.tool == Tool::Select || def.tool == Tool::StrikeOut) {
+            menu->addSeparator();
+            bar->addSeparator();
+        }
+    }
+}
+
+void MainWindow::triggerTool(PdfView::Tool tool, const QColor &color)
+{
+    using Tool = PdfView::Tool;
+    // With text already selected, a markup shortcut marks that text and
+    // leaves the current tool alone.
+    PdfView *v = currentView();
+    if (v && v->hasTextSelection() && (tool == Tool::Highlight || tool == Tool::Underline || tool == Tool::StrikeOut)) {
+        const auto kind = tool == Tool::Highlight ? AnnotationData::Kind::Highlight
+            : tool == Tool::Underline ? AnnotationData::Kind::Underline
+                                      : AnnotationData::Kind::StrikeOut;
+        v->markupSelection(kind, color);
+        updateUi(); // restores the checked tool
+        return;
+    }
+    setTool(tool, color);
+}
+
+void MainWindow::setTool(PdfView::Tool tool, const QColor &color)
+{
+    m_tool = tool;
+    m_toolColor = color;
+    for (const TabPane *pane : m_panes) {
+        for (int i = 0; i < pane->count(); ++i) {
+            pane->view(i)->setTool(tool, color);
+        }
+    }
+    updateUi();
+}
+
+// --- saving ------------------------------------------------------------------
+
+bool MainWindow::saveDocument(const std::shared_ptr<Document> &doc)
+{
+    QString error;
+    if (!doc->save(doc->path(), &error)) {
+        QMessageBox::warning(this, tr("Cannot save"), error);
+        return false;
+    }
+    statusBar()->showMessage(tr("Saved %1").arg(doc->fileName()), 3000);
+    return true;
+}
+
+void MainWindow::saveAs()
+{
+    const PdfView *v = currentView();
+    if (!v) {
+        return;
+    }
+    const std::shared_ptr<Document> doc = v->document();
+    QString path = QFileDialog::getSaveFileName(this, tr("Save As"), doc->path(), tr("PDF documents (*.pdf)"));
+    if (path.isEmpty()) {
+        return;
+    }
+    if (QFileInfo(path).suffix().isEmpty()) {
+        path += QStringLiteral(".pdf");
+    }
+    QString error;
+    if (!doc->save(path, &error)) {
+        QMessageBox::warning(this, tr("Cannot save"), error);
+    }
+}
+
+int MainWindow::viewCount(const std::shared_ptr<Document> &doc) const
+{
+    int n = 0;
+    for (const TabPane *pane : m_panes) {
+        for (int i = 0; i < pane->count(); ++i) {
+            n += pane->view(i)->document() == doc;
+        }
+    }
+    return n;
+}
+
+// True if the document may be closed (saved, discarded, or nothing to lose).
+bool MainWindow::confirmClose(const std::shared_ptr<Document> &doc)
+{
+    if (!doc->isModified()) {
+        return true;
+    }
+    switch (unsavedPrompt(doc->fileName())) {
+    case QMessageBox::Save:
+        return saveDocument(doc);
+    case QMessageBox::Discard:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    QList<std::shared_ptr<Document>> asked;
+    for (const TabPane *pane : m_panes) {
+        for (int i = 0; i < pane->count(); ++i) {
+            const std::shared_ptr<Document> doc = pane->view(i)->document();
+            if (asked.contains(doc)) {
+                continue;
+            }
+            asked.append(doc);
+            if (!confirmClose(doc)) {
+                event->ignore();
+                return;
+            }
+        }
+    }
+    event->accept();
 }
 
 // --- opening ---------------------------------------------------------------
@@ -219,8 +469,22 @@ void MainWindow::openDialog()
 
 void MainWindow::addView(PdfView *view, int pane)
 {
-    connect(view, &PdfView::currentPageChanged, this, &MainWindow::updateUi);
-    connect(view, &PdfView::zoomChanged, this, &MainWindow::updateUi);
+    // Moving a tab between panes comes through here again; connect only once.
+    if (!view->property("connected").toBool()) {
+        view->setProperty("connected", true);
+        Document *doc = view->document().get();
+        connect(view, &PdfView::currentPageChanged, this, &MainWindow::updateUi);
+        connect(view, &PdfView::zoomChanged, this, &MainWindow::updateUi);
+        connect(view, &PdfView::selectionChanged, this, &MainWindow::updateUi);
+        connect(view, &PdfView::toolFinished, this, [this] {
+            setTool(PdfView::Tool::Select, QColor());
+        });
+        // The view is the context so these go away with the tab.
+        connect(doc, &Document::modifiedChanged, view, [this] { updateUi(); });
+        connect(doc, &Document::pathChanged, view, [this] { updateUi(); });
+        connect(doc->undoStack(), &QUndoStack::indexChanged, view, [this] { updateUi(); });
+        view->setTool(m_tool, m_toolColor);
+    }
 
     const bool wasSplit = isSplit();
     const int index = m_panes[pane]->addView(view);
@@ -256,6 +520,10 @@ void MainWindow::closeTab(int pane, int index)
 {
     PdfView *view = m_panes[pane]->view(index);
     if (!view) {
+        return;
+    }
+    // Only the last tab showing a document can lose its changes.
+    if (viewCount(view->document()) == 1 && !confirmClose(view->document())) {
         return;
     }
     m_panes[pane]->removeTab(index);
@@ -416,13 +684,33 @@ void MainWindow::updateUi()
     const PdfView *v = currentView();
     const bool split = isSplit();
 
-    setWindowTitle(v ? tr("%1 — Okular++").arg(v->document()->fileName()) : tr("Okular++"));
+    setWindowTitle(v ? tr("%1%2 — Okular++").arg(v->document()->fileName(), v->document()->isModified() ? QStringLiteral(" *") : QString())
+                     : tr("Okular++"));
     m_pageLabel->setText(v ? tr("Page %1 of %2").arg(v->currentPage() + 1).arg(v->pageCount()) : QString());
     m_zoomLabel->setText(v ? tr("%1 %").arg(qRound(v->zoom() * 100)) : QString());
 
     for (int i = 0; i < 2; ++i) {
         const bool highlight = split && i == m_active;
         m_indicators[i]->setStyleSheet(highlight ? QStringLiteral("background: palette(highlight);") : QString());
+
+        // Tab titles follow the document: renamed by Save As, starred while unsaved.
+        for (int t = 0; t < m_panes[i]->count(); ++t) {
+            const std::shared_ptr<Document> doc = m_panes[i]->view(t)->document();
+            // "&" would otherwise be read as a keyboard mnemonic.
+            const QString name = doc->fileName().replace(QLatin1Char('&'), QStringLiteral("&&"));
+            m_panes[i]->setTabText(t, name + (doc->isModified() ? QStringLiteral(" *") : QString()));
+            m_panes[i]->setTabToolTip(t, doc->path());
+        }
+    }
+
+    Document *doc = v ? v->document().get() : nullptr;
+    m_undoAction->setEnabled(doc && doc->undoStack()->canUndo());
+    m_redoAction->setEnabled(doc && doc->undoStack()->canRedo());
+    m_saveAction->setEnabled(doc && doc->isModified());
+    m_copyAction->setEnabled(v && v->hasTextSelection());
+    m_deleteAction->setEnabled(v && !v->selectedAnnotation().isEmpty());
+    for (const auto &[action, def] : std::as_const(m_toolActions)) {
+        action->setChecked(def.first == m_tool && def.second == m_toolColor);
     }
 
     for (QAction *action : std::as_const(m_viewActions)) {

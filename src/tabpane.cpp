@@ -58,7 +58,7 @@ PdfView *TabPane::currentView() const
 
 int TabPane::addView(PdfView *view)
 {
-    const int index = addTab(view, view->document()->fileName());
+    const int index = addTab(view, view->document()->fileName().replace(QLatin1Char('&'), QStringLiteral("&&")));
     setTabToolTip(index, view->document()->path());
     return index;
 }

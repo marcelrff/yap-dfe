@@ -31,6 +31,31 @@ ctest --test-dir build                        # offscreen smoke test
 | First / last page | Ctrl+Home / Ctrl+End |
 | Scroll | wheel, drag, arrows, PgUp/PgDn, Space |
 
+### Annotating
+
+| Tool | Shortcut |
+|---|---|
+| Select (text, annotations) | Alt+1 |
+| Highlight yellow / green / blue / pink | Alt+2 / Alt+3 / Alt+4 / Alt+5 |
+| Underline / strike out | Alt+6 / Alt+7 |
+| Comment | Alt+8 |
+| Text | Alt+9 |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z |
+| Copy selected text | Ctrl+C |
+| Delete selected annotation | Del |
+| Save / save as | Ctrl+S / Ctrl+Shift+S |
+| Back to Select | Esc |
+
+- With text selected, Alt+2…7 marks that text. With nothing selected they
+  switch to that tool: every drag over text then marks it, until Esc.
+- Comment: click where the note should go. Double-click any annotation,
+  highlights included, to edit its comment; hover to read it.
+- Text: click and type. Enter finishes, Shift+Enter starts a new line, Esc
+  cancels. The tool stays on, so several fields can be filled in a row.
+- In Select, click an annotation to select it, drag comments and text to move
+  them, right-click for more (recolour, delete).
+- Annotations are standard PDF annotations and show up in other viewers.
+
 F8 shows the current document in a second pane at the same position; each
 pane has its own tabs. Right-click a tab for more options. The pane with the
 coloured strip on top is the one keyboard commands apply to.
