@@ -76,6 +76,10 @@ public:
     QList<AnnotationData> annotations(int page);
     bool cachedAnnotations(int page, QList<AnnotationData> *out) const;
 
+    // Where `text` occurs on a page. Each match is one normalised rectangle,
+    // or two when it runs over a line end (hyphenated words). Thread-safe.
+    QList<QList<QRectF>> search(int page, const QString &text, bool caseSensitive);
+
     // Undoable edits. addAnnotation() returns the new annotation's id.
     QString addAnnotation(AnnotationData data);
     void removeAnnotation(int page, const QString &id);

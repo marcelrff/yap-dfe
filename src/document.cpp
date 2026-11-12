@@ -19,7 +19,7 @@ const QSet<Poppler::Annotation::SubType> SupportedTypes{Poppler::Annotation::ATe
 
 QString newId()
 {
-    return QStringLiteral("okpp-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    return QStringLiteral("yapdfv-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
 Poppler::HighlightAnnotation::HighlightType toPoppler(AnnotationData::Kind kind)
@@ -391,6 +391,47 @@ QList<AnnotationData> Document::annotations(int page)
     lock.unlock();
     cachedAnnotations(page, &list);
     return list;
+}
+
+QList<QList<QRectF>> Document::search(int page, const QString &text, bool caseSensitive)
+{
+    QList<QList<QRectF>> matches;
+    if (page < 0 || page >= m_sizes.size() || text.isEmpty()) {
+        return matches;
+    }
+    QMutexLocker lock(&m_mutex);
+    const std::unique_ptr<Poppler::Page> p = m_doc->page(page);
+    if (!p) {
+        return matches;
+    }
+    const QSizeF pt = m_sizes.at(page);
+    const auto normalise = [pt](const QRectF &r) {
+        return QRectF(r.x() / pt.width(), r.y() / pt.height(), r.width() / pt.width(), r.height() / pt.height());
+    };
+    const Poppler::Page::SearchFlags flags = caseSensitive ? Poppler::Page::NoSearchFlags : Poppler::Page::IgnoreCase;
+
+    // Searching across lines also finds words hyphenated at a line end, but
+    // Poppler reports such a match as two separate rectangles. Comparing with
+    // a plain search tells the halves apart: whatever the plain search did
+    // not find is half of a cross-line match, and the halves come in pairs.
+    const QList<QRectF> plain = p->search(text, flags);
+    const QList<QRectF> all = p->search(text, flags | Poppler::Page::AcrossLines);
+    const auto isPlain = [&plain](const QRectF &r) {
+        for (const QRectF &q : plain) {
+            if (qAbs(q.x() - r.x()) < 0.5 && qAbs(q.y() - r.y()) < 0.5 && qAbs(q.width() - r.width()) < 0.5) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (int i = 0; i < all.size(); ++i) {
+        QList<QRectF> match{normalise(all.at(i))};
+        if (!isPlain(all.at(i)) && i + 1 < all.size() && !isPlain(all.at(i + 1))) {
+            match.append(normalise(all.at(++i)));
+        }
+        matches.append(match);
+    }
+    return matches;
 }
 
 // --- editing ------------------------------------------------------------------

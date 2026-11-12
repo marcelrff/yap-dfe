@@ -7,6 +7,9 @@
 #include "tabpane.h"
 
 #include <QAction>
+#include <QCheckBox>
+#include <QLabel>
+#include <QLineEdit>
 #include <QClipboard>
 #include <QPlainTextEdit>
 #include <QPainter>
@@ -77,14 +80,24 @@ private:
     };
 
 
+    // Scrolls the page label to about a third down the viewport, unless it
+    // is already comfortably in view.
+    static void showLabel(PdfView *v, int page)
+    {
+        const auto text = v->document()->pageText(page);
+        const int y = v->viewportPoint(page, text->first().rect.topLeft()).y();
+        if (y < 20 || y > v->viewport()->height() - 150) {
+            QScrollBar *bar = v->verticalScrollBar();
+            bar->setValue(bar->value() + y - v->viewport()->height() / 3);
+        }
+    }
+
     // Drags across the page label ("A 1") with the left button.
     static void dragAcrossText(PdfView *v, int page)
     {
         const auto text = v->document()->pageText(page);
         QVERIFY(text->size() >= 2);
-        // Scroll the label to about a third down the viewport first.
-        QScrollBar *bar = v->verticalScrollBar();
-        bar->setValue(bar->value() + v->viewportPoint(page, text->first().rect.topLeft()).y() - v->viewport()->height() / 3);
+        showLabel(v, page);
         QVERIFY(v->viewport()->rect().contains(v->viewportPoint(page, text->last().rect.center())));
         const QPoint from = v->viewportPoint(page, text->first().rect.center());
         const QPoint to = v->viewportPoint(page, text->last().rect.center());
@@ -97,6 +110,7 @@ private:
     // Colour of the page background just inside the first character's box.
     static QColor colorAtText(PdfView *v, int page)
     {
+        showLabel(v, page);
         const auto text = v->document()->pageText(page);
         const QPoint p = v->viewportPoint(page, text->first().rect.topLeft()) + QPoint(3, 3);
         return v->viewport()->grab().toImage().pixelColor(p);
@@ -111,6 +125,8 @@ private Q_SLOTS:
     void initTestCase()
     {
         QVERIFY(m_dir.isValid());
+        // Keep the test's settings (dark mode) away from the user's.
+        qputenv("XDG_CONFIG_HOME", m_dir.path().toUtf8());
         m_a = m_dir.filePath(QStringLiteral("a.pdf"));
         m_b = m_dir.filePath(QStringLiteral("b.pdf"));
         writePdf(m_a, 6, QStringLiteral("A"));
@@ -182,7 +198,7 @@ private Q_SLOTS:
         // Middle click closes.
         QTest::mouseClick(f.left->tabBar(), Qt::MiddleButton, {}, f.left->tabBar()->tabRect(0).center());
         QCOMPARE(f.left->count(), 0);
-        QCOMPARE(f.window.windowTitle(), QStringLiteral("Okular++"));
+        QCOMPARE(f.window.windowTitle(), QStringLiteral("yap-dfv"));
     }
 
     void renderingAndNavigation()
@@ -577,6 +593,145 @@ private Q_SLOTS:
         QCOMPARE(f.right->tabText(0), QStringLiteral("a.pdf *"));
 
         left->document()->undoStack()->undo();
+    }
+
+    void search()
+    {
+        Fixture f;
+        f.window.openFile(m_a); // pages are labelled "A 1" … "A 6"
+        PdfView *v = f.left->currentView();
+        auto *edit = f.window.findChild<QLineEdit *>(QStringLiteral("findEdit"));
+        auto *status = f.window.findChild<QLabel *>(QStringLiteral("findStatus"));
+        QVERIFY(edit && status);
+        QVERIFY(!edit->isVisible());
+
+        QCOMPARE(action(f.window, QStringLiteral("Find…"))->shortcut(), QKeySequence(QKeySequence::Find));
+        trigger(f.window, QStringLiteral("Find…"));
+        QVERIFY(edit->isVisible());
+
+        // Typing searches the whole document; case is ignored by default.
+        QTest::keyClicks(edit, QStringLiteral("a"));
+        QTRY_COMPARE(status->text(), QStringLiteral("1 of 6"));
+        QCOMPARE(v->matchCount(), 6);
+        QCOMPARE(v->currentPage(), 0);
+
+        // Enter goes forward, Shift+Enter back, both wrap around.
+        QTest::keyClick(edit, Qt::Key_Return);
+        QCOMPARE(status->text(), QStringLiteral("2 of 6"));
+        QCOMPARE(v->currentPage(), 1);
+        QTest::keyClick(edit, Qt::Key_Return, Qt::ShiftModifier);
+        QTest::keyClick(edit, Qt::Key_Return, Qt::ShiftModifier);
+        QCOMPARE(status->text(), QStringLiteral("6 of 6"));
+        QCOMPARE(v->currentPage(), 5);
+        trigger(f.window, QStringLiteral("Find Next"));
+        QCOMPARE(status->text(), QStringLiteral("1 of 6"));
+        QCOMPARE(v->currentPage(), 0);
+
+        // The current match is painted on the page.
+        QTRY_VERIFY(!f.window.isRendering());
+        const QColor marked = colorAtText(v, 0);
+        QVERIFY2(marked.red() > 240 && marked.blue() < 160, qPrintable(marked.name()));
+
+        // Refining the query jumps to the page that has it.
+        edit->setText(QStringLiteral("4"));
+        QTRY_COMPARE(status->text(), QStringLiteral("1 of 1"));
+        QCOMPARE(v->currentPage(), 3);
+
+        // Nothing found.
+        edit->setText(QStringLiteral("zebra"));
+        QTRY_COMPARE(status->text(), QStringLiteral("No matches"));
+        QCOMPARE(v->matchCount(), 0);
+
+        // Match case.
+        edit->setText(QStringLiteral("a"));
+        QTRY_COMPARE(v->matchCount(), 6);
+        f.window.findChild<QCheckBox *>()->setChecked(true);
+        QTRY_COMPARE(status->text(), QStringLiteral("No matches"));
+        f.window.findChild<QCheckBox *>()->setChecked(false);
+        QTRY_COMPARE(v->matchCount(), 6);
+
+        // Another tab is searched for the same text once it is current.
+        f.window.openFile(m_b); // "B 1" … "B 3"
+        PdfView *b = f.left->currentView();
+        QTRY_COMPARE(status->text(), QStringLiteral("No matches"));
+        edit->setText(QStringLiteral("b"));
+        QTRY_COMPARE(status->text(), QStringLiteral("1 of 3"));
+        QCOMPARE(b->matchCount(), 3);
+
+        // Esc closes the bar and clears the marks.
+        QTest::keyClick(edit, Qt::Key_Escape);
+        QVERIFY(!edit->isVisible());
+        QCOMPARE(b->matchCount(), 0);
+
+        // Ctrl+F with text selected searches for it.
+        f.left->setCurrentIndex(0);
+        v->goToPage(1);
+        dragAcrossText(v, 1);
+        QCOMPARE(v->selectedText(), QStringLiteral("A 2"));
+        trigger(f.window, QStringLiteral("Find…"));
+        QCOMPARE(edit->text(), QStringLiteral("A 2"));
+        QTest::keyClick(edit, Qt::Key_Escape);
+    }
+
+    void darkMode()
+    {
+        {
+            Fixture f;
+            QVERIFY(!f.window.darkMode());
+            f.window.openFile(m_a);
+            PdfView *v = f.left->currentView();
+            QTRY_VERIFY(!f.window.isRendering());
+            const QColor lightUi = f.window.palette().color(QPalette::Window);
+            QCOMPARE(colorAtText(v, 0), QColor(Qt::white));
+
+            QCOMPARE(action(f.window, QStringLiteral("Dark Mode"))->shortcut(), QKeySequence(Qt::CTRL | Qt::Key_D));
+            trigger(f.window, QStringLiteral("Dark Mode"));
+            QVERIFY(f.window.darkMode());
+            QVERIFY(action(f.window, QStringLiteral("Dark Mode"))->isChecked());
+            QTRY_VERIFY(!f.window.isRendering());
+
+            // Paper is dark grey, the blue band keeps its hue, the UI is dark.
+            QCOMPARE(colorAtText(v, 0), PdfView::darkened(Qt::white));
+            QVERIFY(colorAtText(v, 0).lightness() < 40);
+            v->goToPage(0);
+            QTRY_VERIFY(!f.window.isRendering());
+            const QImage shot = v->viewport()->grab().toImage();
+            const QColor band = shot.pixelColor(shot.width() / 2, 40);
+            QVERIFY2(band.blue() > band.red() + 60 && band.blue() > band.green() + 60, qPrintable(band.name()));
+            QVERIFY(f.window.palette().color(QPalette::Window).lightness() < 80);
+
+            // A highlight is still yellow-ish on the dark page, before and after the re-render.
+            dragAcrossText(v, 0);
+            trigger(f.window, QStringLiteral("Highlight Yellow"));
+            const auto yellowish = [](const QColor &c) {
+                return c.red() > 120 && c.green() > 100 && c.blue() < 60;
+            };
+            QVERIFY2(yellowish(colorAtText(v, 0)), qPrintable(colorAtText(v, 0).name()));
+            QTRY_VERIFY(!f.window.isRendering());
+            QVERIFY2(yellowish(colorAtText(v, 0)), qPrintable(colorAtText(v, 0).name()));
+            trigger(f.window, QStringLiteral("Undo"));
+
+            // A second tab opens dark as well.
+            f.window.openFile(m_b);
+            QVERIFY(f.left->currentView()->darkMode());
+
+            Q_UNUSED(lightUi)
+        }
+        {
+            // Remembered across restarts; switching off restores everything.
+            Fixture f;
+            QVERIFY(f.window.darkMode());
+            f.window.openFile(m_a);
+            PdfView *v = f.left->currentView();
+            QTRY_VERIFY(!f.window.isRendering());
+            QVERIFY(colorAtText(v, 0).lightness() < 40);
+            trigger(f.window, QStringLiteral("Dark Mode"));
+            QTRY_VERIFY(!f.window.isRendering());
+            QCOMPARE(colorAtText(v, 0), QColor(Qt::white));
+            QVERIFY(f.window.palette().color(QPalette::Window).lightness() > 150);
+        }
+        Fixture f;
+        QVERIFY(!f.window.darkMode());
     }
 };
 

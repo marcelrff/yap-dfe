@@ -8,13 +8,13 @@
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-    QApplication::setApplicationName(QStringLiteral("okular++"));
-    QApplication::setApplicationDisplayName(QStringLiteral("Okular++"));
+    QApplication::setApplicationName(QStringLiteral("yap-dfv"));
+    QApplication::setApplicationDisplayName(QStringLiteral("yap-dfv"));
     QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
-    QApplication::setDesktopFileName(QStringLiteral("okularpp"));
+    QApplication::setDesktopFileName(QStringLiteral("yap-dfv"));
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("Tabbed PDF viewer with side-by-side panes"));
+    parser.setApplicationDescription(QStringLiteral("Yet Another P-DF Viewer: tabs, side-by-side panes, annotations"));
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addPositionalArgument(QStringLiteral("files"), QStringLiteral("PDF files to open, one tab each."), QStringLiteral("[files...]"));

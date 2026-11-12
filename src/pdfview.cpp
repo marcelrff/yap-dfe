@@ -36,6 +36,34 @@ constexpr double NoteSize = 20; // side of a comment icon, in points
 constexpr double TextSize = 12; // font size of typed text, in points
 constexpr int EditorInset = 3; // border + document margin of the inline editor
 
+constexpr int DarkFloor = 28; // darkest value on a dark page: dark grey, not black
+
+// Inverts lightness but keeps hue and saturation, so a yellow highlight
+// stays yellow. Adding the same amount to all three channels does exactly
+// that; the result is then lifted so that white paper becomes dark grey.
+inline QRgb darkenPixel(QRgb px)
+{
+    const int r = qRed(px), g = qGreen(px), b = qBlue(px);
+    const int d = 255 - std::max({r, g, b}) - std::min({r, g, b});
+    const auto lift = [](int v) {
+        return DarkFloor + v * (255 - DarkFloor) / 255;
+    };
+    return qRgb(lift(r + d), lift(g + d), lift(b + d));
+}
+
+void darkenImage(QImage &image)
+{
+    if (image.format() != QImage::Format_RGB32 && image.format() != QImage::Format_ARGB32) {
+        image = image.convertToFormat(QImage::Format_RGB32);
+    }
+    for (int y = 0; y < image.height(); ++y) {
+        QRgb *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+        for (int x = 0; x < image.width(); ++x) {
+            line[x] = darkenPixel(line[x]);
+        }
+    }
+}
+
 bool defaultCommentEditor(QWidget *parent, QString *text)
 {
     QDialog dialog(parent);
@@ -91,7 +119,7 @@ std::function<bool(QWidget *, QString *)> PdfView::commentEditor = defaultCommen
 class InlineEditor : public QPlainTextEdit
 {
 public:
-    InlineEditor(QWidget *parent, const QFont &font, std::function<void(bool)> finished)
+    InlineEditor(QWidget *parent, const QFont &font, bool dark, std::function<void(bool)> finished)
         : QPlainTextEdit(parent)
         , m_finished(std::move(finished))
     {
@@ -101,7 +129,8 @@ public:
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         document()->setDocumentMargin(EditorInset - 1);
-        setStyleSheet(QStringLiteral("QPlainTextEdit { background: rgba(255,255,255,235); color: black; border: 1px dashed #3daee9; }"));
+        setStyleSheet(dark ? QStringLiteral("QPlainTextEdit { background: rgba(28,28,28,235); color: white; border: 1px dashed #3daee9; }")
+                           : QStringLiteral("QPlainTextEdit { background: rgba(255,255,255,235); color: black; border: 1px dashed #3daee9; }"));
         connect(this, &QPlainTextEdit::textChanged, this, &InlineEditor::fit);
         fit();
     }
@@ -167,6 +196,7 @@ PdfView::~PdfView()
     for (const Pending &p : std::as_const(m_pending)) {
         p.cancel->store(true);
     }
+    cancelSearch();
 }
 
 int PdfView::pageCount() const
@@ -442,8 +472,15 @@ void PdfView::startRenders()
                 viewport()->update();
             }
         });
-        watcher->setFuture(QtConcurrent::run([doc = m_doc, page, size, cancel] {
-            return cancel->load() ? QImage() : doc->render(page, size);
+        watcher->setFuture(QtConcurrent::run([doc = m_doc, page, size, cancel, dark = m_dark] {
+            if (cancel->load()) {
+                return QImage();
+            }
+            QImage image = doc->render(page, size);
+            if (dark && !image.isNull()) {
+                darkenImage(image);
+            }
+            return image;
         }));
     }
 }
@@ -461,7 +498,7 @@ void PdfView::paintEvent(QPaintEvent *event)
     const auto [first, last] = visibleRange();
     for (int page = first; page <= last; ++page) {
         const QRect r = m_rects.at(page);
-        p.fillRect(r, Qt::white);
+        p.fillRect(r, m_dark ? darkened(Qt::white) : QColor(Qt::white));
         const auto it = m_cache.constFind(page);
         if (it != m_cache.constEnd()) {
             const bool exact = it->size() == (QSizeF(r.size()) * dpr).toSize();
@@ -498,6 +535,28 @@ void PdfView::paintEvent(QPaintEvent *event)
         }
     }
 
+    // Search matches; the current one stands out.
+    for (int page = first; page <= last; ++page) {
+        const auto hits = m_hits.constFind(page);
+        if (hits == m_hits.constEnd()) {
+            continue;
+        }
+        p.setPen(Qt::NoPen);
+        for (int i = 0; i < hits->size(); ++i) {
+            const bool current = page == m_hitPage && i == m_hitIndex;
+            for (const QRectF &n : hits->at(i)) {
+                const QRectF r = toContent(page, n).adjusted(-1, -1, 1, 1);
+                p.fillRect(r, current ? QColor(255, 140, 0, 130) : QColor(255, 215, 0, 90));
+                if (current) {
+                    p.setPen(QPen(QColor(255, 120, 0), 1.5));
+                    p.setBrush(Qt::NoBrush);
+                    p.drawRect(r);
+                    p.setPen(Qt::NoPen);
+                }
+            }
+        }
+    }
+
     // Outline of the selected annotation, following the mouse while it is moved.
     if (const std::optional<AnnotationData> a = selectedAnnotationData()) {
         QRectF r = toContent(a->page, a->boundary).adjusted(-2, -2, 2, 2);
@@ -516,12 +575,17 @@ void PdfView::paintMarkup(QPainter &p, int page, AnnotationData::Kind kind, cons
     p.save();
     for (const QRectF &n : rects) {
         const QRectF r = toContent(page, n);
-        if (kind == AnnotationData::Kind::Highlight) {
+        if (kind == AnnotationData::Kind::Highlight && m_dark) {
+            // What multiplying does on white paper, adding does on a dark page.
+            const QColor c = darkened(color);
+            p.setCompositionMode(QPainter::CompositionMode_Plus);
+            p.fillRect(r, QColor(c.red() - DarkFloor, c.green() - DarkFloor, c.blue() - DarkFloor));
+        } else if (kind == AnnotationData::Kind::Highlight) {
             p.setCompositionMode(QPainter::CompositionMode_Multiply);
             p.fillRect(r, color);
         } else {
             const double y = kind == AnnotationData::Kind::StrikeOut ? r.center().y() : r.bottom() - r.height() * 0.08;
-            p.setPen(QPen(color, std::max(1.0, r.height() * 0.06)));
+            p.setPen(QPen(m_dark ? darkened(color) : color, std::max(1.0, r.height() * 0.06)));
             p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y));
         }
     }
@@ -838,7 +902,7 @@ void PdfView::openEditor(int page, QPointF topLeft, const std::optional<Annotati
     const double fontSize = existing ? existing->fontSize : TextSize;
     m_editPage = page;
     m_editExisting = existing;
-    m_editor = new InlineEditor(viewport(), editorFont(fontSize * pxPerPoint()), [this](bool accept) {
+    m_editor = new InlineEditor(viewport(), editorFont(fontSize * pxPerPoint()), m_dark, [this](bool accept) {
         finishEditor(accept);
     });
     if (existing) {
@@ -897,6 +961,165 @@ void PdfView::finishEditor(bool accept)
         d.contents = text;
         d.boundary = QRectF(topLeft, size);
         m_doc->addAnnotation(d);
+    }
+}
+
+// --- dark mode ---------------------------------------------------------------
+
+QColor PdfView::darkened(const QColor &color)
+{
+    return QColor::fromRgb(darkenPixel(color.rgb()));
+}
+
+void PdfView::setDarkMode(bool dark)
+{
+    if (dark == m_dark) {
+        return;
+    }
+    finishEditor(true);
+    m_dark = dark;
+    // Every cached image is in the other mode now.
+    for (const Pending &p : std::as_const(m_pending)) {
+        p.cancel->store(true);
+    }
+    m_pending.clear();
+    m_cache.clear();
+    m_stale.clear();
+    viewport()->update();
+    requestRenders(0);
+}
+
+// --- search ------------------------------------------------------------------
+
+void PdfView::cancelSearch()
+{
+    if (m_searchWatcher) {
+        m_searchWatcher->disconnect(this);
+        m_searchWatcher->cancel();
+        m_searchWatcher->deleteLater();
+        m_searchWatcher = nullptr;
+    }
+}
+
+void PdfView::setSearch(const QString &text, bool caseSensitive)
+{
+    if (text == m_searchText && caseSensitive == m_searchCase) {
+        return;
+    }
+    cancelSearch();
+    // Keep looking from where the current match was, so that typing more
+    // letters refines the match instead of jumping away.
+    const int start = m_hitPage >= 0 ? m_hitPage : m_currentPage;
+    m_searchText = text;
+    m_searchCase = caseSensitive;
+    m_hits.clear();
+    m_hitPage = m_hitIndex = -1;
+    viewport()->update();
+
+    if (!text.isEmpty()) {
+        m_searchWatcher = new QFutureWatcher<PageHits>(this);
+        connect(m_searchWatcher, &QFutureWatcher<PageHits>::resultReadyAt, this, [this, watcher = m_searchWatcher](int index) {
+            const PageHits hits = watcher->resultAt(index);
+            m_hits.insert(hits.page, hits.matches);
+            if (m_hitPage < 0) {
+                // Pages arrive starting at the current one, so the first
+                // result is the nearest match ahead.
+                m_hitPage = hits.page;
+                m_hitIndex = 0;
+                showCurrentMatch();
+            }
+            viewport()->update();
+            Q_EMIT searchChanged();
+        });
+        connect(m_searchWatcher, &QFutureWatcher<PageHits>::finished, this, &PdfView::searchChanged);
+        m_searchWatcher->setFuture(QtConcurrent::run([doc = m_doc, text, caseSensitive, start](QPromise<PageHits> &promise) {
+            const int n = doc->pageCount();
+            for (int i = 0; i < n && !promise.isCanceled(); ++i) {
+                const int page = (start + i) % n;
+                const QList<QList<QRectF>> matches = doc->search(page, text, caseSensitive);
+                if (!matches.isEmpty()) {
+                    promise.addResult(PageHits{page, matches});
+                }
+            }
+        }));
+    }
+    Q_EMIT searchChanged();
+}
+
+bool PdfView::isSearching() const
+{
+    return m_searchWatcher && m_searchWatcher->isRunning();
+}
+
+int PdfView::matchCount() const
+{
+    int n = 0;
+    for (const QList<QList<QRectF>> &matches : m_hits) {
+        n += matches.size();
+    }
+    return n;
+}
+
+int PdfView::currentMatch() const
+{
+    if (m_hitPage < 0) {
+        return -1;
+    }
+    int n = 0;
+    for (auto it = m_hits.constBegin(); it != m_hits.constEnd() && it.key() < m_hitPage; ++it) {
+        n += it->size();
+    }
+    return n + m_hitIndex;
+}
+
+void PdfView::findNext(bool forward)
+{
+    if (m_hits.isEmpty()) {
+        return;
+    }
+    auto it = m_hits.constFind(m_hitPage);
+    if (it == m_hits.constEnd()) {
+        it = m_hits.constBegin();
+        m_hitIndex = forward ? -1 : it->size();
+    }
+    m_hitIndex += forward ? 1 : -1;
+    if (m_hitIndex >= it->size()) {
+        // On to the next page with matches, wrapping around at the end.
+        ++it;
+        if (it == m_hits.constEnd()) {
+            it = m_hits.constBegin();
+        }
+        m_hitIndex = 0;
+    } else if (m_hitIndex < 0) {
+        if (it == m_hits.constBegin()) {
+            it = m_hits.constEnd();
+        }
+        --it;
+        m_hitIndex = it->size() - 1;
+    }
+    m_hitPage = it.key();
+    showCurrentMatch();
+    viewport()->update();
+    Q_EMIT searchChanged();
+}
+
+// Scrolls only if the current match is not comfortably in view.
+void PdfView::showCurrentMatch()
+{
+    const auto it = m_hits.constFind(m_hitPage);
+    if (it == m_hits.constEnd() || m_hitIndex < 0 || m_hitIndex >= it->size()) {
+        return;
+    }
+    const QRect r = toContent(m_hitPage, it->at(m_hitIndex).first()).toAlignedRect();
+    QScrollBar *v = verticalScrollBar();
+    QScrollBar *h = horizontalScrollBar();
+    const QSize vp = viewport()->size();
+    const int margin = 40;
+    if (r.top() < v->value() + margin || r.bottom() > v->value() + vp.height() - margin) {
+        v->setValue(r.center().y() - vp.height() / 3);
+    }
+    if (r.left() < h->value() + margin || r.right() > h->value() + vp.width() - margin) {
+        h->setValue(r.center().x() - vp.width() / 2);
     }
 }
 

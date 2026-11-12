@@ -3,9 +3,11 @@
 #include "document.h"
 
 #include <QAbstractScrollArea>
+#include <QFutureWatcher>
 #include <QHash>
 #include <QImage>
 #include <QList>
+#include <QMap>
 #include <QPointer>
 #include <QRect>
 #include <QSet>
@@ -76,6 +78,21 @@ public:
     QString selectedAnnotation() const { return m_selAnnotId; }
     bool deleteSelectedAnnotation();
 
+    // --- search ---
+    // Starts searching the whole document in the background; matches come
+    // in page by page, beginning at the current page. Empty text clears.
+    void setSearch(const QString &text, bool caseSensitive);
+    void findNext(bool forward);
+    QString searchText() const { return m_searchText; }
+    int matchCount() const;
+    int currentMatch() const; // 0-based position among all matches, -1 if none
+    bool isSearching() const;
+
+    // Dark pages: lightness is inverted, colours keep their hue.
+    void setDarkMode(bool dark);
+    bool darkMode() const { return m_dark; }
+    static QColor darkened(const QColor &color);
+
     // Viewport position of a normalised point on a page.
     QPoint viewportPoint(int page, QPointF normalised) const;
 
@@ -91,6 +108,7 @@ Q_SIGNALS:
     void currentPageChanged(int page);
     void zoomChanged(double zoom);
     void selectionChanged();
+    void searchChanged(); // match count, current match or progress changed
     void toolFinished(); // the view wants to go back to the Select tool
 
 protected:
@@ -159,6 +177,8 @@ private:
     void finishEditor(bool accept);
     void paintMarkup(QPainter &p, int page, AnnotationData::Kind kind, const QColor &color, const QList<QRectF> &rects) const;
     void updateCursor(QPoint viewportPos);
+    void cancelSearch();
+    void showCurrentMatch();
     void startPan(QMouseEvent *event);
 
     std::shared_ptr<Document> m_doc;
@@ -190,6 +210,19 @@ private:
 
     int m_selAnnotPage = -1;
     QString m_selAnnotId;
+
+    struct PageHits {
+        int page;
+        QList<QList<QRectF>> matches;
+    };
+    QString m_searchText;
+    bool m_searchCase = false;
+    QMap<int, QList<QList<QRectF>>> m_hits; // pages with matches, in page order
+    int m_hitPage = -1; // current match
+    int m_hitIndex = -1;
+    QFutureWatcher<PageHits> *m_searchWatcher = nullptr;
+
+    bool m_dark = false;
 
     QPointer<InlineEditor> m_editor;
     int m_editPage = 0;

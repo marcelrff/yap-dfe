@@ -1,6 +1,7 @@
-# Okular++
+# yap-dfv
 
-A tabbed PDF viewer for Linux with side-by-side panes in one window.
+Yet Another P-DF Viewer: tabbed, with side-by-side panes in one window,
+annotations, search and a dark mode.
 C++20, Qt 6, Poppler.
 
 ## Build
@@ -10,8 +11,8 @@ Needs `qt6-base`, `poppler-qt6`, `cmake` and `ninja` (Arch package names).
 ```sh
 cmake -S . -B build -G Ninja
 cmake --build build
-./build/okular++ file1.pdf file2.pdf          # one tab per file
-./build/okular++ --split left.pdf right.pdf   # start side by side
+./build/yap-dfv file1.pdf file2.pdf          # one tab per file
+./build/yap-dfv --split left.pdf right.pdf   # start side by side
 ctest --test-dir build                        # offscreen smoke test
 ```
 
@@ -30,6 +31,14 @@ ctest --test-dir build                        # offscreen smoke test
 | Go to page | Ctrl+G |
 | First / last page | Ctrl+Home / Ctrl+End |
 | Scroll | wheel, drag, arrows, PgUp/PgDn, Space |
+| Find | Ctrl+F (searches for the selected text, if any) |
+| Next / previous match | Enter / Shift+Enter in the find bar, F3 / Shift+F3 |
+| Dark mode | Ctrl+D |
+
+Search covers the whole document, ignores case unless "Match case" is ticked,
+and finds words hyphenated across a line end. Dark mode inverts page
+lightness but keeps colours, darkens the interface, and is remembered; the
+first start follows the desktop's colour scheme.
 
 ### Annotating
 
@@ -64,6 +73,7 @@ coloured strip on top is the one keyboard commands apply to.
 
 - `src/document.*` — Poppler wrapper shared by all views of one file
 - `src/pdfview.*` — continuous-scroll view with background rendering
+- `src/findbar.*` — the search strip
 - `src/tabpane.*` — one tab strip and its views
 - `src/mainwindow.*` — the two panes, menus and shortcuts
 - `tests/smoketest.cpp` — drives the real window offscreen

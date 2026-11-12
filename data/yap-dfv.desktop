@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Okular++
+Name=yap-dfv
 GenericName=PDF Viewer
-Comment=Tabbed PDF viewer with side-by-side panes
-Exec=okular++ %F
+Comment=Yet Another P-DF Viewer
+Exec=yap-dfv %F
 Icon=application-pdf
 Terminal=false
 Categories=Office;Viewer;Qt;

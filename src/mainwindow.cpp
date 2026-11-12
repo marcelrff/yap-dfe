@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 
 #include "document.h"
+#include "findbar.h"
 #include "pdfview.h"
 #include "tabpane.h"
 
@@ -10,6 +11,8 @@
 #include <QDragEnterEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QSettings>
+#include <QStyleHints>
 #include <QToolBar>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -25,6 +28,41 @@
 #include <QVBoxLayout>
 
 namespace {
+QSettings appSettings()
+{
+    return QSettings(QStringLiteral("yap-dfv"), QStringLiteral("yap-dfv"));
+}
+
+QPalette darkPalette()
+{
+    const QColor text(222, 222, 222);
+    const QColor disabled(120, 120, 120);
+    QPalette p;
+    p.setColor(QPalette::Window, QColor(45, 45, 48));
+    p.setColor(QPalette::WindowText, text);
+    p.setColor(QPalette::Base, QColor(30, 30, 32));
+    p.setColor(QPalette::AlternateBase, QColor(45, 45, 48));
+    p.setColor(QPalette::ToolTipBase, QColor(60, 60, 64));
+    p.setColor(QPalette::ToolTipText, text);
+    p.setColor(QPalette::Text, text);
+    p.setColor(QPalette::PlaceholderText, QColor(140, 140, 140));
+    p.setColor(QPalette::Button, QColor(56, 56, 60));
+    p.setColor(QPalette::ButtonText, text);
+    p.setColor(QPalette::BrightText, Qt::white);
+    p.setColor(QPalette::Link, QColor(90, 170, 255));
+    p.setColor(QPalette::Highlight, QColor(61, 174, 233));
+    p.setColor(QPalette::HighlightedText, Qt::white);
+    p.setColor(QPalette::Light, QColor(75, 75, 80));
+    p.setColor(QPalette::Midlight, QColor(62, 62, 66));
+    p.setColor(QPalette::Mid, QColor(18, 18, 20)); // around the pages
+    p.setColor(QPalette::Dark, QColor(24, 24, 26));
+    p.setColor(QPalette::Shadow, Qt::black);
+    for (const QPalette::ColorRole role : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText}) {
+        p.setColor(QPalette::Disabled, role, disabled);
+    }
+    return p;
+}
+
 // Toolbar icons are drawn here so they look the same on every desktop and
 // show the actual marker colours.
 QIcon toolIcon(PdfView::Tool tool, const QColor &color, const QColor &ink)
@@ -103,6 +141,9 @@ MainWindow::MainWindow(QWidget *parent)
         return QMessageBox::question(this, tr("Unsaved changes"), tr("“%1” has unsaved annotations. Save them before closing?").arg(fileName),
                                      QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
     };
+    // Captured once per process, before dark mode can have replaced it.
+    static const QPalette startupPalette = QApplication::palette();
+    m_lightPalette = startupPalette;
     setAcceptDrops(true);
     resize(1280, 860);
 
@@ -140,7 +181,32 @@ MainWindow::MainWindow(QWidget *parent)
         m_indicators[i] = indicator;
     }
     m_wrappers[1]->hide();
-    setCentralWidget(m_splitter);
+    auto *central = new QWidget(this);
+    auto *centralLayout = new QVBoxLayout(central);
+    centralLayout->setContentsMargins(0, 0, 0, 0);
+    centralLayout->setSpacing(0);
+    centralLayout->addWidget(m_splitter, 1);
+    m_findBar = new FindBar(central);
+    centralLayout->addWidget(m_findBar);
+    setCentralWidget(central);
+
+    connect(m_findBar, &FindBar::queryChanged, this, &MainWindow::syncSearch);
+    connect(m_findBar, &FindBar::findNext, this, [this] {
+        if (PdfView *v = currentView()) {
+            v->findNext(true);
+        }
+    });
+    connect(m_findBar, &FindBar::findPrevious, this, [this] {
+        if (PdfView *v = currentView()) {
+            v->findNext(false);
+        }
+    });
+    connect(m_findBar, &FindBar::closed, this, [this] {
+        syncSearch();
+        if (PdfView *v = currentView()) {
+            v->setFocus();
+        }
+    });
 
     m_pageLabel = new QLabel(this);
     m_zoomLabel = new QLabel(this);
@@ -161,6 +227,10 @@ MainWindow::MainWindow(QWidget *parent)
 
     createActions();
     createToolActions();
+
+    // Dark mode is remembered; the first start follows the desktop's scheme.
+    const bool systemDark = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+    setDarkMode(appSettings().value(QStringLiteral("darkMode"), systemDark).toBool());
     updateUi();
 }
 
@@ -196,6 +266,10 @@ void MainWindow::createActions()
                        withView([](PdfView *v) { v->document()->undoStack()->redo(); }));
     edit->addSeparator();
     m_copyAction = add(edit, tr("&Copy"), {QKeySequence::Copy}, withView([](PdfView *v) { v->copySelection(); }));
+    m_viewActions << add(edit, tr("&Find…"), {QKeySequence::Find}, [this] { openFind(); });
+    m_viewActions << add(edit, tr("Find &Next"), {QKeySequence(Qt::Key_F3)}, withView([](PdfView *v) { v->findNext(true); }));
+    m_viewActions << add(edit, tr("Find &Previous"), {QKeySequence(Qt::SHIFT | Qt::Key_F3)}, withView([](PdfView *v) { v->findNext(false); }));
+    edit->addSeparator();
     m_deleteAction = add(edit, tr("&Delete Annotation"), {QKeySequence(Qt::Key_Delete)},
                          withView([](PdfView *v) { v->deleteSelectedAnnotation(); }));
 
@@ -211,6 +285,9 @@ void MainWindow::createActions()
     m_fitWidthAction->setCheckable(true);
     m_fitPageAction->setCheckable(true);
     m_viewActions << m_fitWidthAction << m_fitPageAction;
+    view->addSeparator();
+    m_darkAction = add(view, tr("&Dark Mode"), {QKeySequence(Qt::CTRL | Qt::Key_D)}, [this] { setDarkMode(!m_dark); });
+    m_darkAction->setCheckable(true);
     view->addSeparator();
     m_splitAction = add(view, tr("&Split View"), {QKeySequence(Qt::Key_F8)}, [this] { toggleSplit(); });
     m_splitAction->setCheckable(true);
@@ -259,12 +336,11 @@ void MainWindow::createToolActions()
     bar->setIconSize(QSize(22, 22));
     auto *group = new QActionGroup(this);
 
-    const QColor ink = palette().color(QPalette::WindowText);
     int number = 1;
     for (const Def &def : std::as_const(defs)) {
         // Alt+1 … Alt+9, in toolbar order.
         const QKeySequence key(Qt::ALT | Qt::Key(Qt::Key_0 + number++));
-        QAction *action = menu->addAction(toolIcon(def.tool, def.color, ink), def.text);
+        QAction *action = menu->addAction(def.text);
         action->setShortcut(key);
         action->setCheckable(true);
         action->setToolTip(QStringLiteral("%1 (%2)").arg(def.text).remove(QLatin1Char('&')).arg(key.toString(QKeySequence::NativeText)));
@@ -279,6 +355,55 @@ void MainWindow::createToolActions()
             bar->addSeparator();
         }
     }
+}
+
+// The icons are drawn in the text colour, which changes with dark mode.
+void MainWindow::updateToolIcons()
+{
+    const QColor ink = QApplication::palette().color(QPalette::WindowText);
+    for (const auto &[action, def] : std::as_const(m_toolActions)) {
+        action->setIcon(toolIcon(def.first, def.second, ink));
+    }
+}
+
+// --- dark mode and search ------------------------------------------------------
+
+void MainWindow::setDarkMode(bool dark)
+{
+    m_dark = dark;
+    QApplication::setPalette(dark ? darkPalette() : m_lightPalette);
+    for (const TabPane *pane : m_panes) {
+        for (int i = 0; i < pane->count(); ++i) {
+            pane->view(i)->setDarkMode(dark);
+        }
+    }
+    updateToolIcons();
+    m_darkAction->setChecked(dark);
+    appSettings().setValue(QStringLiteral("darkMode"), dark);
+}
+
+void MainWindow::openFind()
+{
+    const PdfView *v = currentView();
+    if (!v) {
+        return;
+    }
+    // Searching for the selected text is the common case.
+    QString selected = v->selectedText();
+    if (selected.contains(QLatin1Char('\n'))) {
+        selected.clear();
+    }
+    m_findBar->open(selected);
+}
+
+// Makes the current view search for what the find bar says. Other tabs keep
+// their own matches until they become current.
+void MainWindow::syncSearch()
+{
+    if (PdfView *v = currentView()) {
+        v->setSearch(m_findBar->isVisible() ? m_findBar->text() : QString(), m_findBar->caseSensitive());
+    }
+    updateUi();
 }
 
 void MainWindow::triggerTool(PdfView::Tool tool, const QColor &color)
@@ -476,6 +601,8 @@ void MainWindow::addView(PdfView *view, int pane)
         connect(view, &PdfView::currentPageChanged, this, &MainWindow::updateUi);
         connect(view, &PdfView::zoomChanged, this, &MainWindow::updateUi);
         connect(view, &PdfView::selectionChanged, this, &MainWindow::updateUi);
+        connect(view, &PdfView::searchChanged, this, &MainWindow::updateUi);
+        view->setDarkMode(m_dark);
         connect(view, &PdfView::toolFinished, this, [this] {
             setTool(PdfView::Tool::Select, QColor());
         });
@@ -684,8 +811,8 @@ void MainWindow::updateUi()
     const PdfView *v = currentView();
     const bool split = isSplit();
 
-    setWindowTitle(v ? tr("%1%2 — Okular++").arg(v->document()->fileName(), v->document()->isModified() ? QStringLiteral(" *") : QString())
-                     : tr("Okular++"));
+    setWindowTitle(v ? tr("%1%2 — yap-dfv").arg(v->document()->fileName(), v->document()->isModified() ? QStringLiteral(" *") : QString())
+                     : tr("yap-dfv"));
     m_pageLabel->setText(v ? tr("Page %1 of %2").arg(v->currentPage() + 1).arg(v->pageCount()) : QString());
     m_zoomLabel->setText(v ? tr("%1 %").arg(qRound(v->zoom() * 100)) : QString());
 
@@ -700,6 +827,26 @@ void MainWindow::updateUi()
             const QString name = doc->fileName().replace(QLatin1Char('&'), QStringLiteral("&&"));
             m_panes[i]->setTabText(t, name + (doc->isModified() ? QStringLiteral(" *") : QString()));
             m_panes[i]->setTabToolTip(t, doc->path());
+        }
+    }
+
+    // The find bar follows the current view, e.g. after switching tabs.
+    if (m_findBar->isVisible()) {
+        if (!v) {
+            m_findBar->setStatus(QString(), false);
+        } else if (v->searchText() != m_findBar->text()) {
+            currentView()->setSearch(m_findBar->text(), m_findBar->caseSensitive());
+        }
+        if (v) {
+            const int count = v->matchCount();
+            const QString more = v->isSearching() ? QStringLiteral("+") : QString();
+            if (v->searchText().isEmpty()) {
+                m_findBar->setStatus(QString(), false);
+            } else if (count == 0) {
+                m_findBar->setStatus(v->isSearching() ? tr("Searching…") : tr("No matches"), !v->isSearching());
+            } else {
+                m_findBar->setStatus(tr("%1 of %2%3").arg(v->currentMatch() + 1).arg(count).arg(more), false);
+            }
         }
     }
 

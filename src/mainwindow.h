@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 
+class FindBar;
 class QAction;
 class QFrame;
 class QLabel;
@@ -30,6 +31,9 @@ public:
 
     PdfView::Tool tool() const { return m_tool; }
 
+    bool darkMode() const { return m_dark; }
+    void setDarkMode(bool dark);
+
     // Asked before a document with unsaved changes is closed; answers Save,
     // Discard or Cancel. Replaceable so tests can answer without a dialog.
     std::function<QMessageBox::StandardButton(const QString &fileName)> unsavedPrompt;
@@ -42,6 +46,9 @@ protected:
 private:
     void createActions();
     void createToolActions();
+    void updateToolIcons();
+    void openFind();
+    void syncSearch();
     void triggerTool(PdfView::Tool tool, const QColor &color);
     void setTool(PdfView::Tool tool, const QColor &color);
     bool saveDocument(const std::shared_ptr<Document> &doc);
@@ -71,6 +78,11 @@ private:
     std::array<QWidget *, 2> m_wrappers{};
     std::array<QFrame *, 2> m_indicators{};
     int m_active = 0;
+
+    FindBar *m_findBar = nullptr;
+    bool m_dark = false;
+    QPalette m_lightPalette; // the palette the application started with
+    QAction *m_darkAction = nullptr;
 
     QLabel *m_pageLabel = nullptr;
     QLabel *m_zoomLabel = nullptr;
