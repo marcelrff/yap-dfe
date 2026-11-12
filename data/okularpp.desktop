@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Okular++
+GenericName=PDF Viewer
+Comment=Tabbed PDF viewer with side-by-side panes
+Exec=okular++ %F
+Icon=application-pdf
+Terminal=false
+Categories=Office;Viewer;Qt;
+MimeType=application/pdf;
