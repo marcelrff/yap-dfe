@@ -9,6 +9,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDrag>
 #include <QDragEnterEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -30,8 +31,10 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QProcess>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QUuid>
 #include <QVBoxLayout>
 
 namespace {
@@ -143,12 +146,25 @@ QIcon toolIcon(PdfView::Tool tool, const QColor &color, const QColor &ink)
 }
 }
 
+std::function<bool(const QStringList &)> MainWindow::startInstance = [](const QStringList &arguments) {
+    return QProcess::startDetached(QCoreApplication::applicationFilePath(), arguments);
+};
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
+    , m_id(QUuid::createUuid().toString(QUuid::WithoutBraces))
 {
     unsavedPrompt = [this](const QString &fileName) {
         return QMessageBox::question(this, tr("Unsaved changes"), tr("“%1” has unsaved annotations. Save them before closing?").arg(fileName),
                                      QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    };
+    saveBeforeDetach = [this](const std::shared_ptr<Document> &doc) {
+        const auto answer = QMessageBox::question(this, tr("Unsaved changes"),
+                                                  tr("“%1” has unsaved annotations. The new window opens the file as saved on disk. "
+                                                     "Save the annotations first?")
+                                                      .arg(doc->fileName()),
+                                                  QMessageBox::Save | QMessageBox::Cancel, QMessageBox::Save);
+        return answer == QMessageBox::Save && saveDocument(doc);
     };
     // Captured once per process, before dark mode can have replaced it.
     static const QPalette startupPalette = QApplication::palette();
@@ -182,6 +198,9 @@ MainWindow::MainWindow(QWidget *parent)
         });
         connect(pane, &QTabWidget::tabBarClicked, this, [this, i] {
             setActivePane(i);
+        });
+        connect(pane, &TabPane::tabDragRequested, this, [this, i](int index) {
+            dragTab(i, index);
         });
 
         m_splitter->addWidget(wrapper);
@@ -338,9 +357,15 @@ void MainWindow::createActions()
                          [this] { switchTab(-1); });
     go->addSeparator();
     m_viewActions << add(go, tr("&Go to Page…"), {QKeySequence(Qt::CTRL | Qt::Key_G)}, [this] { goToPageDialog(); });
-    m_viewActions << add(go, tr("&First Page"), {QKeySequence(Qt::CTRL | Qt::Key_Home)}, withView([](PdfView *v) { v->goToPage(0); }));
+    m_viewActions << add(go, tr("&First Page"), {QKeySequence(Qt::CTRL | Qt::Key_Home)}, withView([](PdfView *v) { v->jumpTo(0); }));
     m_viewActions << add(go, tr("&Last Page"), {QKeySequence(Qt::CTRL | Qt::Key_End)},
-                         withView([](PdfView *v) { v->goToPage(v->pageCount() - 1); }));
+                         withView([](PdfView *v) { v->jumpTo(v->pageCount() - 1); }));
+    go->addSeparator();
+    // Back to where a link, or one of the jumps above, was taken from.
+    m_backAction = add(go, tr("&Back"), {QKeySequence(Qt::ALT | Qt::Key_Left), QKeySequence(Qt::Key_Back)},
+                       withView([](PdfView *v) { v->goBack(); }));
+    m_forwardAction = add(go, tr("For&ward"), {QKeySequence(Qt::ALT | Qt::Key_Right), QKeySequence(Qt::Key_Forward)},
+                          withView([](PdfView *v) { v->goForward(); }));
 }
 
 // --- tools -------------------------------------------------------------------
@@ -567,15 +592,9 @@ void MainWindow::saveSession()
         QJsonArray tabs;
         for (int i = 0; i < pane->count(); ++i) {
             const PdfView *view = pane->view(i);
-            const PdfView::ViewState state = view->viewState();
-            tabs.append(QJsonObject{
-                {QStringLiteral("path"), view->document()->path()},
-                {QStringLiteral("mode"), int(state.mode)},
-                {QStringLiteral("zoom"), state.zoom},
-                {QStringLiteral("page"), state.page},
-                {QStringLiteral("fx"), state.fx},
-                {QStringLiteral("fy"), state.fy},
-            });
+            QJsonObject tab = viewStateToJson(view->viewState());
+            tab.insert(QStringLiteral("path"), view->document()->path());
+            tabs.append(tab);
         }
         panes.append(QJsonObject{{QStringLiteral("tabs"), tabs}, {QStringLiteral("current"), pane->currentIndex()}});
     }
@@ -588,6 +607,28 @@ void MainWindow::saveSession()
     QSettings settings = appSettings();
     settings.setValue(QStringLiteral("session"), QString::fromUtf8(QJsonDocument(session).toJson(QJsonDocument::Compact)));
     settings.setValue(QStringLiteral("geometry"), saveGeometry());
+}
+
+QJsonObject MainWindow::viewStateToJson(const PdfView::ViewState &state)
+{
+    return QJsonObject{
+        {QStringLiteral("mode"), int(state.mode)},
+        {QStringLiteral("zoom"), state.zoom},
+        {QStringLiteral("page"), state.page},
+        {QStringLiteral("fx"), state.fx},
+        {QStringLiteral("fy"), state.fy},
+    };
+}
+
+PdfView::ViewState MainWindow::viewStateFromJson(const QJsonObject &json)
+{
+    PdfView::ViewState state;
+    state.mode = PdfView::ZoomMode(std::clamp(json.value(QStringLiteral("mode")).toInt(1), 0, 2));
+    state.zoom = json.value(QStringLiteral("zoom")).toDouble(1.0);
+    state.page = json.value(QStringLiteral("page")).toInt();
+    state.fx = json.value(QStringLiteral("fx")).toDouble();
+    state.fy = json.value(QStringLiteral("fy")).toDouble();
+    return state;
 }
 
 void MainWindow::restoreSession()
@@ -625,13 +666,7 @@ void MainWindow::restoreSession()
             if (!view) {
                 continue;
             }
-            PdfView::ViewState state;
-            state.mode = PdfView::ZoomMode(std::clamp(tab.value(QStringLiteral("mode")).toInt(1), 0, 2));
-            state.zoom = tab.value(QStringLiteral("zoom")).toDouble(1.0);
-            state.page = tab.value(QStringLiteral("page")).toInt();
-            state.fx = tab.value(QStringLiteral("fx")).toDouble();
-            state.fy = tab.value(QStringLiteral("fy")).toDouble();
-            view->restoreViewState(state);
+            view->restoreViewState(viewStateFromJson(tab));
             if (t == pane.value(QStringLiteral("current")).toInt()) {
                 current[p] = view;
             }
@@ -693,6 +728,11 @@ std::shared_ptr<Document> MainWindow::loadDocument(const QString &path)
 
 bool MainWindow::openFile(const QString &path, int pane)
 {
+    return openTab(path, pane, -1, std::nullopt);
+}
+
+bool MainWindow::openTab(const QString &path, int pane, int insertAt, const std::optional<PdfView::ViewState> &state)
+{
     if (pane < 0) {
         pane = m_active;
     }
@@ -701,6 +741,9 @@ bool MainWindow::openFile(const QString &path, int pane)
     const int existing = m_panes[pane]->indexOfPath(absolute);
     if (existing >= 0) {
         m_panes[pane]->setCurrentIndex(existing);
+        if (state) {
+            m_panes[pane]->currentView()->restoreViewState(*state);
+        }
         m_panes[pane]->currentView()->setFocus();
         return true;
     }
@@ -712,9 +755,27 @@ bool MainWindow::openFile(const QString &path, int pane)
     if (!doc) {
         return false;
     }
-    addView(new PdfView(doc), pane);
+    auto *view = new PdfView(doc);
+    if (state) {
+        view->restoreViewState(*state);
+    }
+    addView(view, pane, insertAt);
     noteRecentFile(absolute);
     return true;
+}
+
+void MainWindow::openLinkedFile(const QString &path, int page)
+{
+    if (!QFileInfo(path).isFile()) {
+        QMessageBox::warning(this, tr("Cannot follow link"), tr("The linked file “%1” does not exist.").arg(path));
+        return;
+    }
+    if (!openFile(path)) {
+        return;
+    }
+    if (PdfView *v = currentView(); v && page >= 0) {
+        v->jumpTo(page);
+    }
 }
 
 // --- recent files ------------------------------------------------------------
@@ -824,6 +885,8 @@ void MainWindow::addView(PdfView *view, int pane, int insertAt)
         connect(view, &PdfView::zoomChanged, this, &MainWindow::updateUi);
         connect(view, &PdfView::selectionChanged, this, &MainWindow::updateUi);
         connect(view, &PdfView::searchChanged, this, &MainWindow::updateUi);
+        connect(view, &PdfView::historyChanged, this, &MainWindow::updateUi);
+        connect(view, &PdfView::openFileRequested, this, &MainWindow::openLinkedFile);
         view->setDarkMode(m_dark && m_darkPages);
         connect(view, &PdfView::toolFinished, this, [this] {
             setTool(PdfView::Tool::Select, QColor());
@@ -875,7 +938,17 @@ void MainWindow::closeTab(int pane, int index)
     if (viewCount(view->document()) == 1 && !confirmClose(view->document())) {
         return;
     }
-    m_panes[pane]->removeTab(index);
+    discardView(view);
+}
+
+void MainWindow::discardView(PdfView *view)
+{
+    for (TabPane *pane : m_panes) {
+        const int index = pane->indexOf(view);
+        if (index >= 0) {
+            pane->removeTab(index);
+        }
+    }
     view->deleteLater();
     normalizePanes();
     if (PdfView *next = currentView()) {
@@ -1013,7 +1086,7 @@ void MainWindow::goToPageDialog()
     const int page = QInputDialog::getInt(this, tr("Go to Page"), tr("Page (1–%1):").arg(v->pageCount()), v->currentPage() + 1, 1,
                                           v->pageCount(), 1, &ok);
     if (ok) {
-        v->goToPage(page - 1);
+        v->jumpTo(page - 1);
     }
 }
 
@@ -1036,7 +1109,18 @@ void MainWindow::updateUi()
     setWindowTitle(v ? tr("%1%2 — yap-dfe").arg(v->document()->fileName(), v->document()->isModified() ? QStringLiteral(" *") : QString())
                      : tr("yap-dfe"));
     m_pageLabel->setText(v ? tr("Page %1 of %2").arg(v->currentPage() + 1).arg(v->pageCount()) : QString());
-    m_zoomLabel->setText(v ? tr("%1 %").arg(qRound(v->zoom() * 100)) : QString());
+    // In a fit mode the zoom follows the window and can be anything, also
+    // over 100 %; saying so explains the number.
+    QString zoom;
+    if (v) {
+        zoom = tr("%1 %").arg(qRound(v->zoom() * 100));
+        if (v->zoomMode() == PdfView::ZoomMode::FitWidth) {
+            zoom = tr("%1 (fit width)").arg(zoom);
+        } else if (v->zoomMode() == PdfView::ZoomMode::FitPage) {
+            zoom = tr("%1 (fit page)").arg(zoom);
+        }
+    }
+    m_zoomLabel->setText(zoom);
 
     for (int i = 0; i < 2; ++i) {
         const bool highlight = split && i == m_active;
@@ -1085,6 +1169,8 @@ void MainWindow::updateUi()
     m_redoAction->setEnabled(doc && doc->undoStack()->canRedo());
     m_saveAction->setEnabled(doc && doc->isModified());
     m_copyAction->setEnabled(v && v->hasTextSelection());
+    m_backAction->setEnabled(v && v->canGoBack());
+    m_forwardAction->setEnabled(v && v->canGoForward());
     m_deleteAction->setEnabled(v && !v->selectedAnnotation().isEmpty());
     for (const auto &[action, def] : std::as_const(m_toolActions)) {
         action->setChecked(def.first == m_tool && def.second == m_toolColor);
@@ -1104,47 +1190,144 @@ void MainWindow::updateUi()
 
 // --- drag and drop ---------------------------------------------------------
 
+// A tab is dragged as JSON: which window and tab it is, and, for a window in
+// another process, enough to open it again at the same place.
+void MainWindow::dragTab(int pane, int index)
+{
+    const QPointer<PdfView> view = m_panes[pane]->view(index);
+    if (!view || m_tabDrag.active) {
+        return;
+    }
+    const std::shared_ptr<Document> doc = view->document();
+    QJsonObject payload{
+        {QStringLiteral("window"), m_id},
+        {QStringLiteral("pane"), pane},
+        {QStringLiteral("index"), index},
+        {QStringLiteral("path"), doc->path()},
+        {QStringLiteral("modified"), doc->isModified()},
+        {QStringLiteral("state"), viewStateToJson(view->viewState())},
+    };
+    auto *mime = new QMimeData;
+    mime->setData(QString::fromLatin1(TabPane::tabMimeType()), QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    auto *drag = new QDrag(this);
+    drag->setMimeData(mime);
+    drag->setPixmap(m_panes[pane]->tabBar()->grab(m_panes[pane]->tabBar()->tabRect(index)));
+
+    m_tabDrag = {};
+    m_tabDrag.active = true;
+    const Qt::DropAction action = TabPane::execDrag(drag);
+    const auto result = m_tabDrag;
+    m_tabDrag = {};
+    if (m_dropIndicator) {
+        m_dropIndicator->hide();
+    }
+
+    if (!view || result.droppedHere) {
+        return; // closed meanwhile, or moved within this window
+    }
+    if (action == Qt::MoveAction) {
+        // Another window has opened it.
+        discardView(view);
+    } else if (action == Qt::IgnoreAction && !result.inside) {
+        // Dropped where nobody takes it: outside every window.
+        detachTab(view);
+    }
+}
+
+// Moves a tab into a new window, a yap-dfe process of its own.
+void MainWindow::detachTab(PdfView *view)
+{
+    // The only tab would leave an empty window behind, for nothing.
+    if (!isSplit() && m_panes[0]->count() < 2) {
+        return;
+    }
+    const QPointer<PdfView> guard = view;
+    const std::shared_ptr<Document> doc = view->document();
+    if (doc->isModified() && (!saveBeforeDetach(doc) || doc->isModified())) {
+        return;
+    }
+    if (!guard) {
+        return;
+    }
+    QStringList arguments{QStringLiteral("--new-window"), QStringLiteral("--view-state"),
+                          QString::fromUtf8(QJsonDocument(viewStateToJson(view->viewState())).toJson(QJsonDocument::Compact))};
+    // Wayland does not let a window choose where it appears.
+    if (!QGuiApplication::platformName().startsWith(QStringLiteral("wayland"))) {
+        const QPoint at = QCursor::pos();
+        arguments << QStringLiteral("--at") << QStringLiteral("%1,%2").arg(at.x()).arg(at.y());
+    }
+    arguments << QStringLiteral("--") << doc->path();
+    if (!startInstance(arguments)) {
+        QMessageBox::warning(this, tr("Cannot open window"), tr("A new yap-dfe window could not be started."));
+        return;
+    }
+    discardView(view);
+}
+
 // Works out what dropping a dragged tab at `pos` would do. Returns false if
 // it would do nothing (dropped on its own pane, or it is the only tab).
-bool MainWindow::tabDropTarget(const QMimeData *mime, const QPoint &pos, int *fromPane, int *index, int *toPane, int *insertAt,
-                               QRect *area) const
+bool MainWindow::tabDropTarget(const QMimeData *mime, const QPoint &pos, TabDrop *drop) const
 {
-    const QList<QByteArray> parts = mime->data(QString::fromLatin1(TabPane::tabMimeType())).split(':');
-    if (parts.size() != 2) {
+    const QJsonObject payload = QJsonDocument::fromJson(mime->data(QString::fromLatin1(TabPane::tabMimeType()))).object();
+    const QString window = payload.value(QStringLiteral("window")).toString();
+    if (window.isEmpty()) {
         return false;
     }
-    *fromPane = parts.at(0) == m_panes[1]->objectName().toUtf8() ? 1 : 0;
-    *index = parts.at(1).toInt();
-    if (!m_panes[*fromPane]->view(*index)) {
-        return false;
+    drop->ownWindow = window == m_id;
+    if (drop->ownWindow) {
+        drop->fromPane = std::clamp(payload.value(QStringLiteral("pane")).toInt(), 0, 1);
+        drop->index = payload.value(QStringLiteral("index")).toInt(-1);
+        if (!m_panes[drop->fromPane]->view(drop->index)) {
+            return false;
+        }
+    } else {
+        drop->path = payload.value(QStringLiteral("path")).toString();
+        drop->modified = payload.value(QStringLiteral("modified")).toBool();
+        drop->state = viewStateFromJson(payload.value(QStringLiteral("state")).toObject());
+        if (drop->path.isEmpty()) {
+            return false;
+        }
     }
 
     // In a split window the pane under the pointer is the target. Otherwise
     // the right half of the window stands for the pane that would be created.
+    const bool empty = m_panes[0]->count() == 0;
     const QRect splitterRect(m_splitter->mapTo(this, QPoint(0, 0)), m_splitter->size());
     QRect left = splitterRect, right = splitterRect;
     if (isSplit()) {
         left = QRect(m_wrappers[0]->mapTo(this, QPoint(0, 0)), m_wrappers[0]->size());
         right = QRect(m_wrappers[1]->mapTo(this, QPoint(0, 0)), m_wrappers[1]->size());
-    } else {
+    } else if (!empty) {
         left.setWidth(splitterRect.width() / 2);
         right.setLeft(left.right() + 1);
     }
-    *toPane = right.contains(pos) ? 1 : 0;
-    *area = *toPane == 1 ? right : left;
-    if (*toPane == *fromPane || !splitterRect.contains(pos) || (!isSplit() && m_panes[0]->count() < 2)) {
+    drop->toPane = !empty && right.contains(pos) ? 1 : 0;
+    drop->area = drop->toPane == 1 ? right : left;
+    if (!splitterRect.contains(pos)) {
+        return false;
+    }
+    if (drop->ownWindow && (drop->toPane == drop->fromPane || (!isSplit() && m_panes[0]->count() < 2))) {
+        return false;
+    }
+    // Another process reads the file from disk, so unsaved annotations would
+    // be lost on the way.
+    if (!drop->ownWindow && drop->modified) {
         return false;
     }
 
     // Dropped on a tab: take that tab's place. Anywhere else: go to the end.
-    const QTabBar *bar = m_panes[*toPane]->tabBar();
-    *insertAt = bar->isVisible() ? bar->tabAt(bar->mapFrom(this, pos)) : -1;
+    const QTabBar *bar = m_panes[drop->toPane]->tabBar();
+    drop->insertAt = bar->isVisible() ? bar->tabAt(bar->mapFrom(this, pos)) : -1;
     return true;
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 {
-    if (event->mimeData()->hasUrls() || event->mimeData()->hasFormat(QString::fromLatin1(TabPane::tabMimeType()))) {
+    if (event->mimeData()->hasFormat(QString::fromLatin1(TabPane::tabMimeType()))) {
+        m_tabDrag.inside = true;
+        // Accepted for now so that move events follow; dragMoveEvent decides.
+        event->acceptProposedAction();
+    } else if (event->mimeData()->hasUrls()) {
         event->acceptProposedAction();
     }
 }
@@ -1155,20 +1338,30 @@ void MainWindow::dragMoveEvent(QDragMoveEvent *event)
         event->acceptProposedAction();
         return;
     }
-    int from, index, to, at;
-    QRect area;
-    const bool ok = tabDropTarget(event->mimeData(), event->position().toPoint(), &from, &index, &to, &at, &area);
+    m_tabDrag.inside = true;
+    TabDrop drop;
+    const bool ok = tabDropTarget(event->mimeData(), event->position().toPoint(), &drop);
     if (!m_dropIndicator) {
         m_dropIndicator = new QRubberBand(QRubberBand::Rectangle, this);
     }
     // Show where the tab would land.
-    m_dropIndicator->setGeometry(area);
+    m_dropIndicator->setGeometry(drop.area);
     m_dropIndicator->setVisible(ok);
-    event->setAccepted(ok);
+    if (!drop.ownWindow && drop.modified) {
+        statusBar()->showMessage(tr("Save the annotations of “%1” first to move it to this window.").arg(QFileInfo(drop.path).fileName()),
+                                 3000);
+    }
+    if (ok) {
+        event->setDropAction(Qt::MoveAction);
+        event->accept();
+    } else {
+        event->ignore();
+    }
 }
 
 void MainWindow::dragLeaveEvent(QDragLeaveEvent *)
 {
+    m_tabDrag.inside = false;
     if (m_dropIndicator) {
         m_dropIndicator->hide();
     }
@@ -1180,12 +1373,21 @@ void MainWindow::dropEvent(QDropEvent *event)
         m_dropIndicator->hide();
     }
     if (event->mimeData()->hasFormat(QString::fromLatin1(TabPane::tabMimeType()))) {
-        int from, index, to, at;
-        QRect area;
-        if (tabDropTarget(event->mimeData(), event->position().toPoint(), &from, &index, &to, &at, &area)) {
-            moveTab(from, index, at);
-            event->acceptProposedAction();
+        m_tabDrag.inside = true;
+        TabDrop drop;
+        if (!tabDropTarget(event->mimeData(), event->position().toPoint(), &drop)) {
+            return;
         }
+        if (drop.ownWindow) {
+            m_tabDrag.droppedHere = true;
+            moveTab(drop.fromPane, drop.index, drop.insertAt);
+        } else if (!openTab(drop.path, drop.toPane, drop.insertAt, drop.state)) {
+            return; // the source keeps its tab
+        } else {
+            activateWindow();
+        }
+        event->setDropAction(Qt::MoveAction);
+        event->accept();
         return;
     }
     // Dropping files on the right half of a split window opens them there.

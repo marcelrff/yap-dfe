@@ -62,6 +62,17 @@ public:
     ViewState viewState() const;
     void restoreViewState(const ViewState &state);
 
+    // A jump the user may want to undo: remembered for goBack(). `left` and
+    // `top` are a normalised position on the page; negative leaves it open.
+    void jumpTo(int page, double left = -1, double top = -1);
+    bool canGoBack() const { return !m_back.isEmpty(); }
+    bool canGoForward() const { return !m_forward.isEmpty(); }
+    void goBack();
+    void goForward();
+
+    // Follows a link as if it had been clicked.
+    void activateLink(const LinkData &link);
+
     bool isRendering() const { return !m_pending.isEmpty() || m_renderTimer.isActive(); }
 
     // --- tools, selection, annotations ---
@@ -103,6 +114,9 @@ public:
     // Asks the user for a comment; returns false if cancelled. Replaceable so
     // tests can answer without a dialog.
     static std::function<bool(QWidget *parent, QString *text)> commentEditor;
+    // Opens a link to a web address or another program. Replaceable so tests
+    // can see what would have been opened.
+    static std::function<void(QWidget *parent, const QUrl &url)> urlOpener;
 
 Q_SIGNALS:
     void currentPageChanged(int page);
@@ -110,6 +124,9 @@ Q_SIGNALS:
     void selectionChanged();
     void searchChanged(); // match count, current match or progress changed
     void toolFinished(); // the view wants to go back to the Select tool
+    void historyChanged(); // canGoBack() or canGoForward() changed
+    // A link points into another PDF; `page` is -1 if it names none.
+    void openFileRequested(const QString &path, int page);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -140,7 +157,7 @@ private:
         QColor color;
         QList<QRectF> rects;
     };
-    enum class Drag { None, Pan, SelectText, PendingAnnot, MoveAnnot };
+    enum class Drag { None, Pan, SelectText, PendingAnnot, MoveAnnot, PendingLink };
 
     double pxPerPoint() const;
     void relayout();
@@ -166,6 +183,11 @@ private:
     int charAt(const PageText &text, int page, QPointF normalised, bool nearest) const;
     static QList<QRectF> lineRects(const PageText &text, int from, int to);
     QPair<int, int> selectionRange() const;
+
+    // links
+    std::optional<LinkData> linkAt(int page, QPointF normalised, bool blocking) const;
+    void scrollTo(int page, double left, double top);
+    void restorePosition(const Anchor &anchor);
 
     // annotations
     std::optional<AnnotationData> annotationAt(int page, QPointF normalised, bool blocking) const;
@@ -203,6 +225,10 @@ private:
     QPoint m_lastPos;
     QPoint m_panLast;
     std::optional<AnnotationData> m_pressAnnot;
+    std::optional<LinkData> m_pressLink;
+
+    QList<Anchor> m_back; // positions before each jump, the latest last
+    QList<Anchor> m_forward;
 
     int m_selPage = -1; // text selection: page, and inclusive character range
     int m_selAnchor = -1;

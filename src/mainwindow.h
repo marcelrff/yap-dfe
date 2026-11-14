@@ -5,9 +5,13 @@
 #include <QMainWindow>
 #include <QMessageBox>
 
+#include <QJsonObject>
+#include <QPointer>
+
 #include <array>
 #include <functional>
 #include <memory>
+#include <optional>
 
 class FindBar;
 class QAction;
@@ -29,6 +33,9 @@ public:
 
     // pane: 0 = left, 1 = right, -1 = the active one.
     bool openFile(const QString &path, int pane = -1);
+    // Like openFile(), at a given tab position (-1 appends) and, if given,
+    // at a given place in the document.
+    bool openTab(const QString &path, int pane, int insertAt, const std::optional<PdfView::ViewState> &state);
     void openFiles(const QStringList &paths, int pane = -1);
     // What a launch asks for: the files as tabs in the active pane; with
     // `split`, the last one in the right pane (a single file in both).
@@ -50,6 +57,21 @@ public:
     // Asked before a document with unsaved changes is closed; answers Save,
     // Discard or Cancel. Replaceable so tests can answer without a dialog.
     std::function<QMessageBox::StandardButton(const QString &fileName)> unsavedPrompt;
+    // Asked before a document with unsaved changes moves to a window of its
+    // own, which reads it from disk; true means saved. Replaceable for tests.
+    std::function<bool(const std::shared_ptr<Document> &doc)> saveBeforeDetach;
+
+    // Starts another yap-dfe process with these arguments. Replaceable so
+    // tests can see the arguments instead.
+    static std::function<bool(const QStringList &arguments)> startInstance;
+
+    // Tells this window apart from others, also in other processes, in the
+    // payload of a dragged tab.
+    QString windowId() const { return m_id; }
+
+    // A view's place as JSON, for the session and for tabs moving between windows.
+    static QJsonObject viewStateToJson(const PdfView::ViewState &state);
+    static PdfView::ViewState viewStateFromJson(const QJsonObject &json);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -76,8 +98,24 @@ private:
     void noteRecentFile(const QString &path);
     void fillRecentMenu();
     void closeTab(int pane, int index);
+    void discardView(PdfView *view); // removes a tab without asking anything
+    void dragTab(int pane, int index);
+    void detachTab(PdfView *view);
+    void openLinkedFile(const QString &path, int page);
     void moveTab(int fromPane, int index, int insertAt = -1);
-    bool tabDropTarget(const QMimeData *mime, const QPoint &pos, int *fromPane, int *index, int *toPane, int *insertAt, QRect *area) const;
+    // What dropping a dragged tab at a point would do.
+    struct TabDrop {
+        bool ownWindow = false; // false: the tab comes from another window
+        int fromPane = 0; // own window only
+        int index = 0; //
+        QString path; // other window only
+        bool modified = false; //
+        PdfView::ViewState state; //
+        int toPane = 0;
+        int insertAt = -1;
+        QRect area; // highlighted while dragging
+    };
+    bool tabDropTarget(const QMimeData *mime, const QPoint &pos, TabDrop *drop) const;
     void saveSession();
     void applyDarkPages();
     void duplicateTab(int fromPane, int index);
@@ -113,6 +151,14 @@ private:
     QAction *m_restoreAction = nullptr;
     QRubberBand *m_dropIndicator = nullptr;
 
+    QString m_id;
+    // While one of this window's tabs is being dragged.
+    struct {
+        bool active = false;
+        bool inside = true; // the pointer is over this window
+        bool droppedHere = false;
+    } m_tabDrag;
+
     QLabel *m_pageLabel = nullptr;
     QLabel *m_zoomLabel = nullptr;
 
@@ -128,6 +174,8 @@ private:
     QAction *m_splitAction = nullptr;
     QAction *m_fitWidthAction = nullptr;
     QAction *m_fitPageAction = nullptr;
+    QAction *m_backAction = nullptr;
+    QAction *m_forwardAction = nullptr;
     QList<QAction *> m_viewActions; // enabled only while a document is open
     QList<QAction *> m_splitOnlyActions;
 };

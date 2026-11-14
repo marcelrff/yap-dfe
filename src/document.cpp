@@ -10,8 +10,10 @@
 
 #include <poppler-annotation.h>
 #include <poppler-converter.h>
+#include <poppler-link.h>
 #include <poppler-qt6.h>
 
+#include <algorithm>
 #include <filesystem>
 
 namespace {
@@ -167,6 +169,86 @@ PageText readText(const Poppler::Page &page, QSizeF pt)
     }
     return chars;
 }
+
+QList<LinkData> readLinks(const Poppler::Page &page, Poppler::Document &doc)
+{
+    QList<LinkData> links;
+    for (const std::unique_ptr<Poppler::Link> &link : page.links()) {
+        LinkData d;
+        // Some producers write the rectangle upside down.
+        d.area = link->linkArea().normalized();
+        if (d.area.isEmpty()) {
+            continue;
+        }
+        switch (link->linkType()) {
+        case Poppler::Link::Goto: {
+            const auto *go = static_cast<const Poppler::LinkGoto *>(link.get());
+            Poppler::LinkDestination dest = go->destination();
+            if (go->isExternal()) {
+                d.kind = LinkData::Kind::File;
+                d.target = go->fileName();
+                d.page = dest.pageNumber() - 1;
+                break;
+            }
+            // Named destinations (as LaTeX writes them) are looked up here.
+            if (dest.pageNumber() <= 0 && !dest.destinationName().isEmpty()) {
+                if (const std::unique_ptr<Poppler::LinkDestination> named = doc.linkDestination(dest.destinationName())) {
+                    dest = *named;
+                }
+            }
+            if (dest.pageNumber() <= 0 || dest.pageNumber() > doc.numPages()) {
+                continue;
+            }
+            d.kind = LinkData::Kind::Goto;
+            d.page = dest.pageNumber() - 1;
+            if (dest.isChangeLeft()) {
+                d.left = std::clamp(dest.left(), 0.0, 1.0);
+            }
+            if (dest.isChangeTop()) {
+                d.top = std::clamp(dest.top(), 0.0, 1.0);
+            }
+            break;
+        }
+        case Poppler::Link::Browse:
+            d.kind = LinkData::Kind::Uri;
+            d.target = static_cast<const Poppler::LinkBrowse *>(link.get())->url().trimmed();
+            if (d.target.isEmpty()) {
+                continue;
+            }
+            break;
+        case Poppler::Link::Action:
+            d.kind = LinkData::Kind::Action;
+            switch (static_cast<const Poppler::LinkAction *>(link.get())->actionType()) {
+            case Poppler::LinkAction::PageFirst:
+                d.action = LinkData::Action::FirstPage;
+                break;
+            case Poppler::LinkAction::PagePrev:
+                d.action = LinkData::Action::PreviousPage;
+                break;
+            case Poppler::LinkAction::PageNext:
+                d.action = LinkData::Action::NextPage;
+                break;
+            case Poppler::LinkAction::PageLast:
+                d.action = LinkData::Action::LastPage;
+                break;
+            case Poppler::LinkAction::HistoryBack:
+                d.action = LinkData::Action::Back;
+                break;
+            case Poppler::LinkAction::HistoryForward:
+                d.action = LinkData::Action::Forward;
+                break;
+            default:
+                continue;
+            }
+            break;
+        default:
+            // Scripts, programs to run, media, forms: not supported.
+            continue;
+        }
+        links.append(d);
+    }
+    return links;
+}
 }
 
 // One undoable annotation change: `before` and `after` are the annotation's
@@ -288,11 +370,12 @@ QImage Document::render(int page, QSize pixelSize)
 
 void Document::primeCaches(int page, const Poppler::Page &p)
 {
-    bool haveText, haveAnnots;
+    bool haveText, haveAnnots, haveLinks;
     {
         QMutexLocker cache(&m_cacheMutex);
         haveText = m_text.contains(page);
         haveAnnots = m_annots.contains(page);
+        haveLinks = m_links.contains(page);
     }
     if (!haveText) {
         auto text = std::make_shared<const PageText>(readText(p, m_sizes.at(page)));
@@ -301,6 +384,11 @@ void Document::primeCaches(int page, const Poppler::Page &p)
     }
     if (!haveAnnots) {
         refreshAnnotations(page, p);
+    }
+    if (!haveLinks) {
+        QList<LinkData> links = readLinks(p, *m_doc);
+        QMutexLocker cache(&m_cacheMutex);
+        m_links.insert(page, std::move(links));
     }
 }
 
@@ -390,6 +478,32 @@ QList<AnnotationData> Document::annotations(int page)
     }
     lock.unlock();
     cachedAnnotations(page, &list);
+    return list;
+}
+
+bool Document::cachedLinks(int page, QList<LinkData> *out) const
+{
+    QMutexLocker cache(&m_cacheMutex);
+    const auto it = m_links.constFind(page);
+    if (it == m_links.constEnd()) {
+        return false;
+    }
+    *out = *it;
+    return true;
+}
+
+QList<LinkData> Document::links(int page)
+{
+    QList<LinkData> list;
+    if (cachedLinks(page, &list)) {
+        return list;
+    }
+    QMutexLocker lock(&m_mutex);
+    if (const std::unique_ptr<Poppler::Page> p = m_doc->page(page)) {
+        primeCaches(page, *p);
+    }
+    lock.unlock();
+    cachedLinks(page, &list);
     return list;
 }
 

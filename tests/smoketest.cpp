@@ -20,6 +20,8 @@
 #include <QDir>
 #include <QDrag>
 #include <QDragEnterEvent>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMimeData>
 #include <QMessageBox>
 #include <QPdfWriter>
@@ -27,8 +29,13 @@
 #include <QScrollBar>
 #include <QStandardPaths>
 #include <QTabBar>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QStatusBar>
+#include <QWheelEvent>
+
+#include "linkpdf.h"
 
 class SmokeTest : public QObject
 {
@@ -36,7 +43,7 @@ class SmokeTest : public QObject
 
 private:
     QTemporaryDir m_dir;
-    QString m_a, m_b;
+    QString m_a, m_b, m_links;
 
     static void writePdf(const QString &path, int pages, const QString &label)
     {
@@ -71,6 +78,45 @@ private:
         QVERIFY2(a, qPrintable(text));
         QVERIFY2(a->isEnabled(), qPrintable(text));
         a->trigger();
+    }
+
+    // The payload of a tab drag, as a window would make it.
+    static QByteArray tabPayload(const MainWindow &w, int pane, int index)
+    {
+        return QJsonDocument(QJsonObject{{QStringLiteral("window"), w.windowId()},
+                                         {QStringLiteral("pane"), pane},
+                                         {QStringLiteral("index"), index}})
+            .toJson(QJsonDocument::Compact);
+    }
+
+    // Plays a drag over `target` and, if it accepts, the drop. Returns what a
+    // real drag would report back to the source.
+    static Qt::DropAction dropOn(QWidget *target, const QMimeData *mime, const QPoint &pos)
+    {
+        QDragEnterEvent enter(QPointF(pos), Qt::MoveAction, mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(target, &enter);
+        QDragMoveEvent moveEvent(QPointF(pos), Qt::MoveAction, mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(target, &moveEvent);
+        if (!moveEvent.isAccepted()) {
+            QDragLeaveEvent leave;
+            QApplication::sendEvent(target, &leave);
+            return Qt::IgnoreAction;
+        }
+        QDropEvent dropEvent(QPointF(pos), Qt::MoveAction, mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(target, &dropEvent);
+        return dropEvent.isAccepted() ? dropEvent.dropAction() : Qt::IgnoreAction;
+    }
+
+    // Drags a tab out of its bar with the mouse, which starts a real drag.
+    static void dragTabOut(TabPane *pane, int index)
+    {
+        QTabBar *bar = pane->tabBar();
+        const QPoint onTab = bar->tabRect(index).center();
+        QTest::mousePress(bar, Qt::LeftButton, {}, onTab);
+        // QTest's own move helper sends no button state, which a drag needs.
+        const QPoint away = onTab + QPoint(40, 200);
+        QMouseEvent event(QEvent::MouseMove, away, bar->mapToGlobal(away), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(bar, &event);
     }
 
     struct Fixture {
@@ -138,6 +184,8 @@ private Q_SLOTS:
         m_b = m_dir.filePath(QStringLiteral("b.pdf"));
         writePdf(m_a, 6, QStringLiteral("A"));
         writePdf(m_b, 3, QStringLiteral("B"));
+        m_links = m_dir.filePath(QStringLiteral("links.pdf"));
+        QVERIFY(writeLinkedPdf(m_links));
     }
 
     void loadStatuses()
@@ -847,6 +895,7 @@ private Q_SLOTS:
         TabPane::execDrag = [&](QDrag *drag) {
             dragged = drag->mimeData()->data(mimeType);
             delete drag;
+            return Qt::IgnoreAction; // Esc, over the window
         };
         QTabBar *bar = f.left->tabBar();
         const QPoint onTab = bar->tabRect(1).center();
@@ -859,31 +908,32 @@ private Q_SLOTS:
         move(onTab + QPoint(5, 0)); // inside the bar: Qt's reordering, no drag
         QVERIFY(dragged.isEmpty());
         move(onTab + QPoint(40, 200));
-        QCOMPARE(dragged, QByteArray("leftPane:1"));
+        const QJsonObject payload = QJsonDocument::fromJson(dragged).object();
+        QCOMPARE(payload.value(QStringLiteral("window")).toString(), f.window.windowId());
+        QCOMPARE(payload.value(QStringLiteral("pane")).toInt(), 0);
+        QCOMPARE(payload.value(QStringLiteral("index")).toInt(), 1);
+        QCOMPARE(payload.value(QStringLiteral("path")).toString(), QFileInfo(m_b).absoluteFilePath());
+        QCOMPARE(f.left->count(), 2); // cancelled: nothing happened
         TabPane::execDrag = savedExec;
 
         const auto drop = [&](const QByteArray &payload, const QPoint &pos) {
             QMimeData mime;
             mime.setData(mimeType, payload);
-            QDragEnterEvent enter(QPointF(pos), Qt::MoveAction, &mime, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(&f.window, &enter);
-            QDragMoveEvent moveEvent(QPointF(pos), Qt::MoveAction, &mime, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(&f.window, &moveEvent);
-            const bool accepted = moveEvent.isAccepted();
-            QDropEvent dropEvent(QPointF(pos), Qt::MoveAction, &mime, Qt::LeftButton, Qt::NoModifier);
-            QApplication::sendEvent(&f.window, &dropEvent);
-            return accepted;
+            return dropOn(&f.window, &mime, pos) == Qt::MoveAction;
+        };
+        const auto tab = [&](int pane, int index) {
+            return tabPayload(f.window, pane, index);
         };
         const auto inWindow = [&](QWidget *w, const QPoint &p) {
             return w->mapTo(&f.window, p);
         };
 
         // Dropping on the tab's own half does nothing.
-        QVERIFY(!drop("leftPane:1", inWindow(f.left, QPoint(50, 300))));
+        QVERIFY(!drop(tab(0, 1), inWindow(f.left, QPoint(50, 300))));
         QCOMPARE(f.left->count(), 2);
 
         // Dropping on the right half of an unsplit window creates the split.
-        QVERIFY(drop("leftPane:1", inWindow(f.left, QPoint(f.left->width() - 50, 300))));
+        QVERIFY(drop(tab(0, 1), inWindow(f.left, QPoint(f.left->width() - 50, 300))));
         QCOMPARE(f.left->count(), 1);
         QCOMPARE(f.right->count(), 1);
         QVERIFY(f.right->isVisible());
@@ -892,13 +942,13 @@ private Q_SLOTS:
         // Dropping onto a tab in the other pane takes that tab's place.
         f.window.openFile(m_a, 1); // right: b, a
         QCOMPARE(f.right->count(), 2);
-        QVERIFY(drop("rightPane:1", inWindow(f.left->tabBar(), f.left->tabBar()->tabRect(0).center())));
+        QVERIFY(drop(tab(1, 1), inWindow(f.left->tabBar(), f.left->tabBar()->tabRect(0).center())));
         QCOMPARE(f.left->count(), 2);
         QCOMPARE(f.right->count(), 1);
         QCOMPARE(f.left->currentIndex(), 0); // inserted in front, and shown
 
         // Dropping below the tabs appends.
-        QVERIFY(drop("rightPane:0", inWindow(f.left, QPoint(60, 300))));
+        QVERIFY(drop(tab(1, 0), inWindow(f.left, QPoint(60, 300))));
         QCOMPARE(f.left->count(), 3);
         QCOMPARE(f.left->currentIndex(), 2);
         QVERIFY(!f.right->isVisible());
@@ -907,10 +957,275 @@ private Q_SLOTS:
         f.window.unsavedPrompt = [](const QString &) { return QMessageBox::Discard; };
         trigger(f.window, QStringLiteral("Close Tab"));
         trigger(f.window, QStringLiteral("Close Tab"));
-        QVERIFY(!drop("leftPane:0", inWindow(f.left, QPoint(f.left->width() - 50, 300))));
-        QVERIFY(!drop("leftPane:7", inWindow(f.left, QPoint(f.left->width() - 50, 300))));
+        QVERIFY(!drop(tab(0, 0), inWindow(f.left, QPoint(f.left->width() - 50, 300))));
+        QVERIFY(!drop(tab(0, 7), inWindow(f.left, QPoint(f.left->width() - 50, 300))));
         QVERIFY(!drop("nonsense", inWindow(f.left, QPoint(f.left->width() - 50, 300))));
         QCOMPARE(f.left->count(), 1);
+    }
+
+    // A tab dropped on another window (in this test the same process, but
+    // the payload is all a window in another process would get) opens there
+    // at the same place and leaves the window it came from.
+    void tabDragBetweenWindows()
+    {
+        Fixture f;
+        Fixture g;
+        f.window.unsavedPrompt = [](const QString &) { return QMessageBox::Discard; };
+        f.window.openFiles({m_a, m_b});
+        f.left->setCurrentIndex(0);
+        PdfView *source = f.left->currentView();
+        source->setZoom(1.5);
+        source->goToPage(3);
+        g.window.openFile(m_b);
+
+        const auto savedExec = TabPane::execDrag;
+        const auto restore = qScopeGuard([&] { TabPane::execDrag = savedExec; });
+        QPoint target;
+        TabPane::execDrag = [&](QDrag *drag) {
+            const Qt::DropAction action = dropOn(&g.window, drag->mimeData(), target);
+            delete drag;
+            return action;
+        };
+
+        // Onto the tab bar of the other window: inserted before b.pdf.
+        target = g.left->tabBar()->mapTo(&g.window, g.left->tabBar()->tabRect(0).center());
+        dragTabOut(f.left, 0);
+        QCOMPARE(f.left->count(), 1);
+        QCOMPARE(f.left->tabText(0), QStringLiteral("b.pdf"));
+        QCOMPARE(g.left->count(), 2);
+        QCOMPARE(g.left->tabText(0), QStringLiteral("a.pdf"));
+        PdfView *moved = g.left->currentView();
+        QCOMPARE(moved->document()->fileName(), QStringLiteral("a.pdf"));
+        QCOMPARE(moved->zoomMode(), PdfView::ZoomMode::Custom);
+        QCOMPARE(moved->zoom(), 1.5);
+        QCOMPARE(moved->currentPage(), 3);
+
+        // Unsaved annotations would not survive the trip: refused, with a hint.
+        f.window.openFile(m_a);
+        f.left->currentView()->document()->addAnnotation(
+            {QString(), 0, AnnotationData::Kind::Note, Qt::yellow, QRectF(0.1, 0.1, 0.05, 0.05), {}, QStringLiteral("hi"), 12});
+        dragTabOut(f.left, f.left->currentIndex());
+        QCOMPARE(f.left->count(), 2);
+        QCOMPARE(g.left->count(), 2);
+        QVERIFY(g.window.statusBar()->currentMessage().contains(QStringLiteral("a.pdf")));
+
+        // The only tab of a window can go too; an empty window stays behind.
+        trigger(f.window, QStringLiteral("Close Tab"));
+        target = g.left->mapTo(&g.window, QPoint(g.left->width() - 50, 300)); // right half: split there
+        dragTabOut(f.left, 0);
+        QCOMPARE(f.left->count(), 0);
+        QCOMPARE(g.right->count(), 1);
+        QCOMPARE(g.right->tabText(0), QStringLiteral("b.pdf"));
+    }
+
+    // Dropped outside every window, a tab moves into a new yap-dfe process.
+    void tabDetach()
+    {
+        Fixture f;
+        f.window.openFiles({m_a, m_b});
+        f.left->setCurrentIndex(0);
+        f.left->currentView()->goToPage(2);
+
+        const auto savedExec = TabPane::execDrag;
+        const auto savedStart = MainWindow::startInstance;
+        const auto restore = qScopeGuard([&] {
+            TabPane::execDrag = savedExec;
+            MainWindow::startInstance = savedStart;
+        });
+        QStringList started;
+        MainWindow::startInstance = [&](const QStringList &arguments) {
+            started = arguments;
+            return true;
+        };
+        bool leave = true;
+        TabPane::execDrag = [&](QDrag *drag) {
+            // Over the window, then (maybe) out of it, then let go.
+            QDragEnterEvent enter(QPointF(100, 100), Qt::MoveAction, drag->mimeData(), Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(&f.window, &enter);
+            if (leave) {
+                QDragLeaveEvent leaveEvent;
+                QApplication::sendEvent(&f.window, &leaveEvent);
+            }
+            delete drag;
+            return Qt::IgnoreAction;
+        };
+
+        // Let go over the window: nothing happens.
+        leave = false;
+        dragTabOut(f.left, 0);
+        QVERIFY(started.isEmpty());
+        QCOMPARE(f.left->count(), 2);
+
+        leave = true;
+        dragTabOut(f.left, 0);
+        QCOMPARE(f.left->count(), 1);
+        QCOMPARE(f.left->tabText(0), QStringLiteral("b.pdf"));
+        QVERIFY(started.contains(QStringLiteral("--new-window")));
+        QCOMPARE(started.constLast(), QFileInfo(m_a).absoluteFilePath());
+        const int stateAt = started.indexOf(QStringLiteral("--view-state"));
+        QVERIFY(stateAt >= 0);
+        const PdfView::ViewState state = MainWindow::viewStateFromJson(QJsonDocument::fromJson(started.at(stateAt + 1).toUtf8()).object());
+        QCOMPARE(state.page, 2);
+
+        // The new process reads the file, so unsaved annotations are saved
+        // first, or the tab stays.
+        const QString copy = m_dir.filePath(QStringLiteral("detach.pdf"));
+        QVERIFY(QFile::copy(m_a, copy));
+        f.window.openFile(copy);
+        const auto doc = f.left->currentView()->document();
+        doc->addAnnotation({QString(), 0, AnnotationData::Kind::Note, Qt::yellow, QRectF(0.1, 0.1, 0.05, 0.05), {}, QStringLiteral("hi"), 12});
+        started.clear();
+        f.window.saveBeforeDetach = [](const std::shared_ptr<Document> &) { return false; };
+        dragTabOut(f.left, f.left->currentIndex());
+        QVERIFY(started.isEmpty());
+        QCOMPARE(f.left->count(), 2);
+        QString error;
+        QVERIFY(doc->save(doc->path(), &error)); // what the real prompt's Save does
+        f.window.saveBeforeDetach = [](const std::shared_ptr<Document> &) { return true; };
+        dragTabOut(f.left, f.left->currentIndex());
+        QVERIFY(!started.isEmpty());
+        QCOMPARE(f.left->count(), 1);
+
+        // The only tab has nowhere to go: the window already is its window.
+        started.clear();
+        dragTabOut(f.left, 0);
+        QVERIFY(started.isEmpty());
+        QCOMPARE(f.left->count(), 1);
+
+        // The view state option the new process gets round-trips.
+        PdfView::ViewState in;
+        in.mode = PdfView::ZoomMode::FitPage;
+        in.zoom = 0.75;
+        in.page = 4;
+        in.fx = 0.25;
+        in.fy = 0.5;
+        const PdfView::ViewState out = MainWindow::viewStateFromJson(MainWindow::viewStateToJson(in));
+        QCOMPARE(out.mode, in.mode);
+        QCOMPARE(out.zoom, in.zoom);
+        QCOMPARE(out.page, in.page);
+        QCOMPARE(out.fx, in.fx);
+        QCOMPARE(out.fy, in.fy);
+    }
+
+    void links()
+    {
+        Document::LoadStatus status;
+        const auto doc = Document::load(m_links, QString(), &status);
+        QCOMPARE(status, Document::LoadStatus::Ok);
+        const QList<LinkData> list = doc->links(0);
+        QCOMPARE(list.size(), 4);
+        QCOMPARE(list.at(0).kind, LinkData::Kind::Goto);
+        QCOMPARE(list.at(0).page, 2);
+        QVERIFY(qAbs(list.at(0).top - 0.5) < 0.01);
+        QCOMPARE(list.at(1).kind, LinkData::Kind::Goto); // named destination, resolved
+        QCOMPARE(list.at(1).page, 1);
+        QCOMPARE(list.at(2).kind, LinkData::Kind::Uri);
+        QCOMPARE(list.at(2).target, QStringLiteral("https://example.org/"));
+        QCOMPARE(list.at(3).kind, LinkData::Kind::Action);
+        QCOMPARE(list.at(3).action, LinkData::Action::LastPage);
+        QVERIFY(doc->links(1).isEmpty());
+
+        Fixture f;
+        f.window.openFile(m_links);
+        PdfView *v = f.left->currentView();
+        QTRY_VERIFY(!f.window.isRendering());
+        QUrl opened;
+        const auto savedOpener = PdfView::urlOpener;
+        const auto restore = qScopeGuard([&] { PdfView::urlOpener = savedOpener; });
+        PdfView::urlOpener = [&](QWidget *, const QUrl &url) { opened = url; };
+
+        const auto top = [v] { return v->viewState(); };
+        const auto click = [&](int link) {
+            v->goToPage(0);
+            const QPoint p = v->viewportPoint(0, list.at(link).area.center());
+            QVERIFY(v->viewport()->rect().contains(p));
+            QTest::mouseClick(v->viewport(), Qt::LeftButton, {}, p);
+        };
+        QVERIFY(!action(f.window, QStringLiteral("Back"))->isEnabled());
+
+        // The chapter three entry: half way down page 3, at the top of the view.
+        click(0);
+        QCOMPARE(top().page, 2);
+        QVERIFY(qAbs(top().fy - 0.5) < 0.05);
+        QVERIFY(action(f.window, QStringLiteral("Back"))->isEnabled());
+        trigger(f.window, QStringLiteral("Back"));
+        QCOMPARE(v->currentPage(), 0);
+        trigger(f.window, QStringLiteral("Forward"));
+        QCOMPARE(top().page, 2);
+        QVERIFY(!action(f.window, QStringLiteral("Forward"))->isEnabled());
+
+        click(1); // named destination: top of page 2
+        QCOMPARE(v->currentPage(), 1);
+        click(2);
+        QCOMPARE(opened, QUrl(QStringLiteral("https://example.org/")));
+        QCOMPARE(v->currentPage(), 0);
+        click(3);
+        QCOMPARE(v->currentPage(), 3);
+
+        // The mouse's back button goes back too.
+        QTest::mouseClick(v->viewport(), Qt::BackButton, {}, QPoint(50, 50));
+        QCOMPARE(v->currentPage(), 0);
+
+        // Dragging across a link selects its text instead of following it.
+        v->goToPage(0);
+        const auto text = doc->pageText(0);
+        QVERIFY(list.at(0).area.contains(text->first().rect.center()));
+        const QPoint from = v->viewportPoint(0, text->first().rect.center());
+        const QPoint to = v->viewportPoint(0, text->at(5).rect.center());
+        QTest::mousePress(v->viewport(), Qt::LeftButton, {}, from);
+        QTest::mouseMove(v->viewport(), (from + to) / 2);
+        QTest::mouseMove(v->viewport(), to);
+        QTest::mouseRelease(v->viewport(), Qt::LeftButton, {}, to);
+        QCOMPARE(v->currentPage(), 0);
+        QVERIFY(v->hasTextSelection());
+        QVERIFY(v->selectedText().startsWith(QStringLiteral("Chap")));
+
+        // With a marker tool a click on a link does not follow it.
+        v->clearTextSelection();
+        trigger(f.window, QStringLiteral("Highlight Yellow"));
+        QCOMPARE(v->tool(), PdfView::Tool::Highlight);
+        opened.clear();
+        click(2);
+        QVERIFY(opened.isEmpty());
+        trigger(f.window, QStringLiteral("Select"));
+
+        // Go to Page can be undone with Back as well.
+        v->goToPage(0);
+        v->jumpTo(3);
+        trigger(f.window, QStringLiteral("Back"));
+        QCOMPARE(v->currentPage(), 0);
+    }
+
+    // The status bar describes the view being scrolled or zoomed, also when
+    // that is the other pane.
+    void statusFollowsScrolledPane()
+    {
+        Fixture f;
+        f.window.openFile(m_a);
+        trigger(f.window, QStringLiteral("Split View"));
+        PdfView *left = f.left->currentView();
+        PdfView *right = f.right->currentView();
+        right->setFocus();
+        QTRY_VERIFY(right->hasFocus());
+        const auto labels = f.window.statusBar()->findChildren<QLabel *>();
+        const auto zoomText = [&] {
+            for (const QLabel *l : labels) {
+                if (l->text().contains(QLatin1Char('%'))) {
+                    return l->text();
+                }
+            }
+            return QString();
+        };
+        QVERIFY(zoomText().contains(QStringLiteral("fit width")));
+
+        const QPoint p(100, 100);
+        QWheelEvent wheel(p, left->viewport()->mapToGlobal(p), QPoint(), QPoint(0, 120), Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase,
+                          false);
+        QApplication::sendEvent(left->viewport(), &wheel);
+        QVERIFY(left->hasFocus());
+        QCOMPARE(left->zoomMode(), PdfView::ZoomMode::Custom);
+        QCOMPARE(zoomText(), QStringLiteral("%1 %").arg(qRound(left->zoom() * 100)));
+        QVERIFY(qRound(left->zoom() * 100) != qRound(right->zoom() * 100));
     }
 
     void sessionRestore()

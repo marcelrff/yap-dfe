@@ -5,6 +5,8 @@
 #include <QCommandLineParser>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTimer>
 
 #include <functional>
@@ -36,6 +38,15 @@ int main(int argc, char *argv[])
     QCommandLineOption grabOption(QStringLiteral("grab"), QStringLiteral("Save a screenshot to <file> and exit."), QStringLiteral("file"));
     grabOption.setFlags(QCommandLineOption::HiddenFromHelp);
     parser.addOption(grabOption);
+    // Used by a window that a tab was dragged out of: where in the document
+    // the new window starts, and where on screen.
+    QCommandLineOption viewStateOption(QStringLiteral("view-state"), QStringLiteral("Zoom and position for the file, as JSON."),
+                                       QStringLiteral("json"));
+    viewStateOption.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOption(viewStateOption);
+    QCommandLineOption atOption(QStringLiteral("at"), QStringLiteral("Screen position <x,y> for the window."), QStringLiteral("x,y"));
+    atOption.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOption(atOption);
     parser.process(app);
 
     SingleInstance::Request request;
@@ -58,8 +69,19 @@ int main(int argc, char *argv[])
     if (request.files.isEmpty()) {
         // Started without files: pick up where the last window left off.
         window.restoreSession();
+    } else if (parser.isSet(viewStateOption) && request.files.size() == 1) {
+        const QJsonObject state = QJsonDocument::fromJson(parser.value(viewStateOption).toUtf8()).object();
+        window.openTab(request.files.first(), 0, -1, MainWindow::viewStateFromJson(state));
     } else {
         window.openRequest(request.files, request.split);
+    }
+    if (parser.isSet(atOption)) {
+        const QStringList xy = parser.value(atOption).split(QLatin1Char(','));
+        if (xy.size() == 2) {
+            // The pointer ends up over the tab bar, as if the window had been
+            // dragged there by its tab.
+            window.move(QPoint(xy.at(0).toInt(), xy.at(1).toInt()) - QPoint(80, 70));
+        }
     }
 
     const std::function<void(const SingleInstance::Request &)> receive = [&](const SingleInstance::Request &incoming) {

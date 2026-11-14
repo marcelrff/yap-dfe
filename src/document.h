@@ -45,6 +45,25 @@ struct TextChar {
 };
 using PageText = QList<TextChar>;
 
+// A clickable area on a page, as the PDF defines it.
+struct LinkData {
+    enum class Kind {
+        Goto, // a place in this document
+        Uri, // a web address or similar
+        File, // a place in another PDF file
+        Action, // a viewer command: first/previous/next/last page, back, forward
+    };
+    enum class Action { None, FirstPage, PreviousPage, NextPage, LastPage, Back, Forward };
+
+    Kind kind = Kind::Goto;
+    QRectF area; // normalised
+    int page = -1; // Goto, File: target page, 0-based (-1: not given)
+    double left = -1; // Goto: target position on that page, normalised;
+    double top = -1; //       negative if the link leaves it open
+    QString target; // Uri: the address; File: the file name as written in the PDF
+    Action action = Action::None;
+};
+
 // A loaded PDF. One instance is shared by every view showing the same file.
 // Lives on the GUI thread; render() may be called from any thread. Every
 // annotation change goes through the undo stack, whose clean state is the
@@ -75,6 +94,8 @@ public:
     std::shared_ptr<const PageText> cachedPageText(int page) const;
     QList<AnnotationData> annotations(int page);
     bool cachedAnnotations(int page, QList<AnnotationData> *out) const;
+    QList<LinkData> links(int page);
+    bool cachedLinks(int page, QList<LinkData> *out) const;
 
     // Where `text` occurs on a page. Each match is one normalised rectangle,
     // or two when it runs over a line end (hyphenated words). Thread-safe.
@@ -117,6 +138,7 @@ private:
     mutable QMutex m_cacheMutex;
     QHash<int, std::shared_ptr<const PageText>> m_text;
     QHash<int, QList<AnnotationData>> m_annots;
+    QHash<int, QList<LinkData>> m_links;
 
     QUndoStack m_undo;
 };

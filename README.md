@@ -30,6 +30,7 @@ ctest --test-dir build                        # offscreen smoke test
 | Fit width / fit page | Ctrl+1 / Ctrl+2 |
 | Go to page | Ctrl+G |
 | First / last page | Ctrl+Home / Ctrl+End |
+| Back / forward (after a link or jump) | Alt+Left / Alt+Right, mouse back / forward buttons |
 | Scroll | wheel, drag, arrows, PgUp/PgDn, Space |
 | Find | Ctrl+F (searches for the selected text, if any) |
 | Next / previous match | Enter / Shift+Enter in the find bar, F3 / Shift+F3 |
@@ -45,7 +46,19 @@ leaves the document as it is.
 
 Drag a tab out of its tab bar to move it: onto the other pane, onto a tab
 there to take its place, or onto the right half of an unsplit window to
-split it.
+split it. The same works between windows. Dropped outside every window, the
+tab moves into a new window of its own. Either way the tab keeps its page and
+zoom. A document with unsaved annotations has to be saved before it can move
+to another window, since that window reads the file from disk.
+
+Links in the document work with the Select tool: click one in a table of
+contents, a reference or a footnote mark to go there, and Alt+Left to come
+back. Web links open in the browser; links to anything other than web or
+mail addresses ask first. Dragging across a link selects its text as usual.
+
+The status bar shows the page and zoom of the view last clicked or scrolled.
+In Fit Width and Fit Page the zoom follows the window size, so it can be
+anything, also well over 100 %; 100 % is the printed size.
 
 Started without files, the last window's tabs, split and reading positions
 come back. File ▸ Restore Tabs on Startup switches that off.

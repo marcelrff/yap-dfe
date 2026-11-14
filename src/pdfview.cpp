@@ -2,24 +2,30 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QDesktopServices>
+#include <QDir>
+#include <QFileInfo>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFutureWatcher>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMenu>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QScrollBar>
 #include <QShortcut>
 #include <QStyleHints>
 #include <QToolTip>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QtConcurrentRun>
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace {
 constexpr int Margin = 12;
@@ -35,6 +41,7 @@ constexpr int KeepPages = 3; // cached on each side of the viewport
 constexpr double NoteSize = 20; // side of a comment icon, in points
 constexpr double TextSize = 12; // font size of typed text, in points
 constexpr int EditorInset = 3; // border + document margin of the inline editor
+constexpr int MaxHistory = 100; // remembered jumps
 
 constexpr int DarkFloor = 28; // darkest value on a dark page: dark grey, not black
 
@@ -90,6 +97,21 @@ bool defaultCommentEditor(QWidget *parent, QString *text)
     return true;
 }
 
+// Web and mail links open right away. Anything else (a local file, some
+// other program's scheme) could run something, so the user confirms first.
+void defaultUrlOpener(QWidget *parent, const QUrl &url)
+{
+    static const QStringList harmless{QStringLiteral("http"), QStringLiteral("https"), QStringLiteral("mailto")};
+    if (!harmless.contains(url.scheme().toLower())) {
+        const QString shown = url.toDisplayString();
+        if (QMessageBox::question(parent, PdfView::tr("Open link"), PdfView::tr("The document links to\n\n%1\n\nOpen it?").arg(shown))
+            != QMessageBox::Yes) {
+            return;
+        }
+    }
+    QDesktopServices::openUrl(url);
+}
+
 QFont editorFont(double pixelSize)
 {
     QFont font(Document::textFontFamily());
@@ -113,6 +135,7 @@ QSizeF textBoxSize(const QString &text, double fontSize)
 }
 
 std::function<bool(QWidget *, QString *)> PdfView::commentEditor = defaultCommentEditor;
+std::function<void(QWidget *, const QUrl &)> PdfView::urlOpener = defaultUrlOpener;
 
 // Text box shown on the page while typing a Text annotation. Enter commits,
 // Shift+Enter starts a new line, Esc cancels; losing focus commits too.
@@ -371,6 +394,133 @@ void PdfView::restoreViewState(const ViewState &state)
     viewport()->update();
     requestRenders(0);
     Q_EMIT zoomChanged(m_zoom);
+}
+
+// --- links and history ---------------------------------------------------------
+
+void PdfView::restorePosition(const Anchor &anchor)
+{
+    restoreAnchor(anchor, QPoint(0, 0));
+    updateCurrentPage();
+}
+
+void PdfView::scrollTo(int page, double left, double top)
+{
+    page = std::clamp(page, 0, pageCount() - 1);
+    const QRect r = m_rects.at(page);
+    const int y = top >= 0 ? r.top() + qRound(top * r.height()) : r.top();
+    verticalScrollBar()->setValue(y - Margin / 2);
+    if (left >= 0) {
+        // Only scroll sideways if the target is out of view.
+        QScrollBar *h = horizontalScrollBar();
+        const int x = r.left() + qRound(left * r.width());
+        if (x < h->value() || x > h->value() + viewport()->width() - Margin) {
+            h->setValue(x - Margin / 2);
+        }
+    }
+    updateCurrentPage();
+}
+
+void PdfView::jumpTo(int page, double left, double top)
+{
+    m_back.append(captureAnchor(QPoint(0, 0)));
+    if (m_back.size() > MaxHistory) {
+        m_back.removeFirst();
+    }
+    m_forward.clear();
+    scrollTo(page, left, top);
+    Q_EMIT historyChanged();
+}
+
+void PdfView::goBack()
+{
+    if (m_back.isEmpty()) {
+        return;
+    }
+    m_forward.append(captureAnchor(QPoint(0, 0)));
+    restorePosition(m_back.takeLast());
+    Q_EMIT historyChanged();
+}
+
+void PdfView::goForward()
+{
+    if (m_forward.isEmpty()) {
+        return;
+    }
+    m_back.append(captureAnchor(QPoint(0, 0)));
+    restorePosition(m_forward.takeLast());
+    Q_EMIT historyChanged();
+}
+
+std::optional<LinkData> PdfView::linkAt(int page, QPointF n, bool blocking) const
+{
+    QList<LinkData> list;
+    if (blocking) {
+        list = m_doc->links(page);
+    } else if (!m_doc->cachedLinks(page, &list)) {
+        return std::nullopt;
+    }
+    // The smallest area wins where links overlap.
+    std::optional<LinkData> best;
+    for (const LinkData &link : std::as_const(list)) {
+        if (link.area.contains(n) && (!best || link.area.width() * link.area.height() < best->area.width() * best->area.height())) {
+            best = link;
+        }
+    }
+    return best;
+}
+
+void PdfView::activateLink(const LinkData &link)
+{
+    switch (link.kind) {
+    case LinkData::Kind::Goto:
+        jumpTo(link.page, link.left, link.top);
+        break;
+    case LinkData::Kind::Uri: {
+        // Some PDFs leave out the scheme ("www.example.org").
+        QUrl url(link.target);
+        if (url.scheme().isEmpty()) {
+            url = QUrl::fromUserInput(link.target);
+        }
+        if (url.isValid()) {
+            urlOpener(this, url);
+        }
+        break;
+    }
+    case LinkData::Kind::File: {
+        // Relative names are relative to this document.
+        QString path = link.target;
+        if (path.startsWith(QStringLiteral("file:"))) {
+            path = QUrl(path).toLocalFile();
+        }
+        Q_EMIT openFileRequested(QFileInfo(QFileInfo(m_doc->path()).dir(), path).absoluteFilePath(), link.page);
+        break;
+    }
+    case LinkData::Kind::Action:
+        switch (link.action) {
+        case LinkData::Action::FirstPage:
+            jumpTo(0);
+            break;
+        case LinkData::Action::PreviousPage:
+            jumpTo(m_currentPage - 1);
+            break;
+        case LinkData::Action::NextPage:
+            jumpTo(m_currentPage + 1);
+            break;
+        case LinkData::Action::LastPage:
+            jumpTo(pageCount() - 1);
+            break;
+        case LinkData::Action::Back:
+            goBack();
+            break;
+        case LinkData::Action::Forward:
+            goForward();
+            break;
+        case LinkData::Action::None:
+            break;
+        }
+        break;
+    }
 }
 
 void PdfView::updateCurrentPage()
@@ -1150,6 +1300,12 @@ void PdfView::scrollContentsBy(int, int)
 
 void PdfView::wheelEvent(QWheelEvent *event)
 {
+    // Scrolling or zooming a view makes it the one the window reports on and
+    // keyboard commands go to, as a click would. Typing elsewhere, e.g. in the
+    // find bar, is not interrupted.
+    if (!hasFocus() && (!QApplication::focusWidget() || qobject_cast<PdfView *>(QApplication::focusWidget()))) {
+        setFocus(Qt::MouseFocusReason);
+    }
     if (event->modifiers() & Qt::ControlModifier) {
         const double steps = event->angleDelta().y() / 120.0;
         if (steps != 0) {
@@ -1208,6 +1364,10 @@ void PdfView::mousePressEvent(QMouseEvent *event)
         startPan(event);
         return;
     }
+    if (event->button() == Qt::BackButton || event->button() == Qt::ForwardButton) {
+        event->button() == Qt::BackButton ? goBack() : goForward();
+        return;
+    }
     if (event->button() != Qt::LeftButton) {
         return;
     }
@@ -1231,6 +1391,12 @@ void PdfView::mousePressEvent(QMouseEvent *event)
         }
         selectAnnotation(-1, QString());
         clearTextSelection();
+        if (const std::optional<LinkData> link = linkAt(page, n, true)) {
+            // A click follows it; a drag still selects the text or pans.
+            m_pressLink = link;
+            m_drag = Drag::PendingLink;
+            return;
+        }
         const int c = charAt(*m_doc->pageText(page), page, n, false);
         if (c >= 0) {
             m_selPage = page;
@@ -1285,6 +1451,27 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
         m_panLast = now;
         horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
         verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
+        break;
+    }
+    case Drag::PendingLink: {
+        if ((pos - m_pressPos).manhattanLength() < QApplication::startDragDistance()) {
+            break;
+        }
+        m_pressLink.reset();
+        int page;
+        QPointF n;
+        const int c = locate(m_pressPos, &page, &n) ? charAt(*m_doc->pageText(page), page, n, false) : -1;
+        if (c < 0) {
+            m_drag = Drag::Pan;
+            m_panLast = event->globalPosition().toPoint() - (pos - m_pressPos);
+            viewport()->setCursor(Qt::ClosedHandCursor);
+            mouseMoveEvent(event);
+            break;
+        }
+        m_selPage = page;
+        m_selAnchor = c;
+        m_drag = Drag::SelectText;
+        mouseMoveEvent(event);
         break;
     }
     case Drag::PendingAnnot:
@@ -1346,6 +1533,11 @@ void PdfView::mouseReleaseEvent(QMouseEvent *event)
         clearTextSelection();
         selectAnnotation(m_pressAnnot->page, m_pressAnnot->id);
         break;
+    case Drag::PendingLink:
+        if (const std::optional<LinkData> link = std::exchange(m_pressLink, std::nullopt)) {
+            activateLink(*link);
+        }
+        break;
     case Drag::MoveAnnot:
         if (const std::optional<AnnotationData> a = selectedAnnotationData()) {
             const QRect r = m_rects.at(a->page);
@@ -1361,6 +1553,7 @@ void PdfView::mouseReleaseEvent(QMouseEvent *event)
         break;
     }
     m_pressAnnot.reset();
+    m_pressLink.reset();
     viewport()->update();
     updateCursor(pos);
 }
@@ -1456,11 +1649,12 @@ void PdfView::updateCursor(QPoint pos)
     if (locate(pos, &page, &n)) {
         // Hovering must never wait for a render, so only use what is cached.
         const std::optional<AnnotationData> a = annotationAt(page, n, false);
+        const std::optional<LinkData> link = m_tool == Tool::Select && !a ? linkAt(page, n, false) : std::nullopt;
         const auto text = m_doc->cachedPageText(page);
         const bool onText = text && charAt(*text, page, n, false) >= 0;
         switch (m_tool) {
         case Tool::Select:
-            if (a) {
+            if (a || link) {
                 shape = Qt::PointingHandCursor;
             } else if (onText) {
                 shape = Qt::IBeamCursor;
@@ -1480,6 +1674,20 @@ void PdfView::updateCursor(QPoint pos)
         }
         if (a && a->kind != AnnotationData::Kind::Text) {
             tip = a->contents;
+        } else if (link) {
+            switch (link->kind) {
+            case LinkData::Kind::Goto:
+                tip = tr("Go to page %1").arg(link->page + 1);
+                break;
+            case LinkData::Kind::Uri:
+                tip = link->target;
+                break;
+            case LinkData::Kind::File:
+                tip = link->page >= 0 ? tr("Open %1, page %2").arg(link->target).arg(link->page + 1) : tr("Open %1").arg(link->target);
+                break;
+            case LinkData::Kind::Action:
+                break;
+            }
         }
     }
     viewport()->setCursor(shape);

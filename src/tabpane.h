@@ -5,7 +5,6 @@
 #include <functional>
 
 class QDrag;
-
 class PdfView;
 
 // One tab strip plus its views. The main window holds two of these in a
@@ -25,15 +24,17 @@ public:
     // Shown across the pane for as long as it has no tabs. Takes ownership.
     void setEmptyWidget(QWidget *widget);
 
-    // A tab dragged out of its bar travels as this MIME type; the payload is
-    // "<pane object name>:<tab index>". The main window handles the drop.
+    // A tab dragged out of its bar travels as this MIME type, between
+    // windows too. The main window fills in the payload and handles the drop.
     static const char *tabMimeType();
-    // Runs the drag. Replaceable so tests can observe it without a real
-    // drag-and-drop session.
-    static std::function<void(QDrag *)> execDrag;
+    // Runs the drag and returns what the drop target did. Replaceable so
+    // tests can play the target without a real drag-and-drop session.
+    static std::function<Qt::DropAction(QDrag *)> execDrag;
 
 Q_SIGNALS:
     void tabContextMenuRequested(int index, const QPoint &globalPos);
+    // The tab left the bar with the mouse button held: time for a real drag.
+    void tabDragRequested(int index);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -42,5 +43,4 @@ protected:
 
 private:
     QWidget *m_emptyWidget = nullptr;
-    void startTabDrag(QWidget *page);
 };

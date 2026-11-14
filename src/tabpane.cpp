@@ -4,7 +4,6 @@
 #include "pdfview.h"
 
 #include <QDrag>
-#include <QMimeData>
 #include <QMouseEvent>
 #include <QPointer>
 #include <QTabBar>
@@ -68,8 +67,8 @@ private:
 };
 }
 
-std::function<void(QDrag *)> TabPane::execDrag = [](QDrag *drag) {
-    drag->exec(Qt::MoveAction);
+std::function<Qt::DropAction(QDrag *)> TabPane::execDrag = [](QDrag *drag) {
+    return drag->exec(Qt::MoveAction);
 };
 
 const char *TabPane::tabMimeType()
@@ -77,25 +76,14 @@ const char *TabPane::tabMimeType()
     return "application/x-yap-dfe-tab";
 }
 
-void TabPane::startTabDrag(QWidget *page)
-{
-    const int index = indexOf(page);
-    if (index < 0) {
-        return;
-    }
-    auto *mime = new QMimeData;
-    mime->setData(QString::fromLatin1(tabMimeType()), objectName().toUtf8() + ':' + QByteArray::number(index));
-    auto *drag = new QDrag(this);
-    drag->setMimeData(mime);
-    drag->setPixmap(tabBar()->grab(tabBar()->tabRect(index)));
-    execDrag(drag);
-}
-
 TabPane::TabPane(QWidget *parent)
     : QTabWidget(parent)
 {
     setTabBar(new TabBar(this, [this](QWidget *page) {
-        startTabDrag(page);
+        const int index = indexOf(page);
+        if (index >= 0) {
+            Q_EMIT tabDragRequested(index);
+        }
     }));
     setDocumentMode(true);
     setMovable(true);
