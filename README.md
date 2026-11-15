@@ -80,6 +80,7 @@ open and brings it to the front. `--new-window` opens a separate one instead.
 | Underline / strike out | Alt+6 / Alt+7 |
 | Comment | Alt+8 |
 | Text | Alt+9 |
+| Pen (red) | Alt+0 |
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z |
 | Copy selected text | Ctrl+C |
 | Delete selected annotation | Del |
@@ -92,6 +93,9 @@ open and brings it to the front. `--new-window` opens a separate one instead.
   highlights included, to edit its comment; hover to read it.
 - Text: click and type. Enter finishes, Shift+Enter starts a new line, Esc
   cancels. The tool stays on, so several fields can be filled in a row.
+- Pen: draw with the left button held. The tool stays on; every stroke is
+  an annotation of its own, so Ctrl+Z takes back the last one, and in Select
+  a stroke can be clicked (on the line), dragged elsewhere or deleted.
 - In Select, click an annotation to select it, drag comments and text to move
   them, right-click for more (recolour, delete).
 - Annotations are standard PDF annotations and show up in other viewers.

@@ -135,6 +135,17 @@ QIcon toolIcon(PdfView::Tool tool, const QColor &color, const QColor &ink)
         p.drawPath(path.simplified());
         break;
     }
+    case PdfView::Tool::Pen: {
+        // A squiggle, as the pen would draw it.
+        QPainterPath path;
+        path.moveTo(8, 44);
+        path.cubicTo(18, 4, 28, 4, 32, 32);
+        path.cubicTo(36, 60, 46, 60, 56, 20);
+        p.setPen(QPen(color, 6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(path);
+        break;
+    }
     case PdfView::Tool::Text:
         p.setPen(ink);
         p.drawText(box, Qt::AlignCenter, QStringLiteral("T"));
@@ -386,6 +397,7 @@ void MainWindow::createToolActions()
     defs.append({tr("Stri&ke Out"), Tool::StrikeOut, PdfView::lineColor()});
     defs.append({tr("&Comment"), Tool::Note, PdfView::noteColor()});
     defs.append({tr("&Text"), Tool::Text, QColor(Qt::black)});
+    defs.append({tr("&Pen"), Tool::Pen, PdfView::penColor()});
 
     QMenu *menu = new QMenu(tr("&Tools"), this);
     menuBar()->insertMenu(menuBar()->actions().at(2), menu); // after Edit
@@ -397,8 +409,8 @@ void MainWindow::createToolActions()
 
     int number = 1;
     for (const Def &def : std::as_const(defs)) {
-        // Alt+1 … Alt+9, in toolbar order.
-        const QKeySequence key(Qt::ALT | Qt::Key(Qt::Key_0 + number++));
+        // Alt+1 … Alt+9 and then Alt+0, in toolbar order.
+        const QKeySequence key(Qt::ALT | Qt::Key(Qt::Key_0 + number++ % 10));
         QAction *action = menu->addAction(def.text);
         action->setShortcut(key);
         action->setCheckable(true);

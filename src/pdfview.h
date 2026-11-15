@@ -32,7 +32,7 @@ class PdfView : public QAbstractScrollArea
 
 public:
     enum class ZoomMode { Custom, FitWidth, FitPage };
-    enum class Tool { Select, Highlight, Underline, StrikeOut, Note, Text };
+    enum class Tool { Select, Highlight, Underline, StrikeOut, Note, Text, Pen };
 
     // Enough to put another view at the same place in the same document.
     struct ViewState {
@@ -110,6 +110,7 @@ public:
     static QList<QPair<QString, QColor>> highlightColors();
     static QColor lineColor(); // underline and strike-out
     static QColor noteColor();
+    static QColor penColor();
 
     // Asks the user for a comment; returns false if cancelled. Replaceable so
     // tests can answer without a dialog.
@@ -156,8 +157,9 @@ private:
         AnnotationData::Kind kind;
         QColor color;
         QList<QRectF> rects;
+        QList<QPointF> stroke = {}; // Ink: the pen stroke
     };
-    enum class Drag { None, Pan, SelectText, PendingAnnot, MoveAnnot, PendingLink };
+    enum class Drag { None, Pan, SelectText, PendingAnnot, MoveAnnot, PendingLink, Draw };
 
     double pxPerPoint() const;
     void relayout();
@@ -197,6 +199,8 @@ private:
     void createNote(int page, QPointF normalised);
     void openEditor(int page, QPointF topLeft, const std::optional<AnnotationData> &existing);
     void finishEditor(bool accept);
+    void paintStroke(QPainter &p, int page, const QColor &color, const QList<QPointF> &stroke) const;
+    void finishStroke();
     void paintMarkup(QPainter &p, int page, AnnotationData::Kind kind, const QColor &color, const QList<QRectF> &rects) const;
     void updateCursor(QPoint viewportPos);
     void cancelSearch();
@@ -226,6 +230,8 @@ private:
     QPoint m_panLast;
     std::optional<AnnotationData> m_pressAnnot;
     std::optional<LinkData> m_pressLink;
+    int m_strokePage = -1; // the pen stroke being drawn
+    QList<QPointF> m_stroke; // normalised
 
     QList<Anchor> m_back; // positions before each jump, the latest last
     QList<Anchor> m_forward;

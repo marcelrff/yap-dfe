@@ -17,7 +17,7 @@
 #include <filesystem>
 
 namespace {
-const QSet<Poppler::Annotation::SubType> SupportedTypes{Poppler::Annotation::AText, Poppler::Annotation::AHighlight};
+const QSet<Poppler::Annotation::SubType> SupportedTypes{Poppler::Annotation::AText, Poppler::Annotation::AHighlight, Poppler::Annotation::AInk};
 
 QString newId()
 {
@@ -90,6 +90,9 @@ void writeCommon(Poppler::Annotation &ann, const AnnotationData &d)
         style.setWidth(0);
     } else {
         style.setColor(d.color);
+        if (d.kind == AnnotationData::Kind::Ink) {
+            style.setWidth(d.width);
+        }
     }
     ann.setStyle(style);
 
@@ -101,6 +104,8 @@ void writeCommon(Poppler::Annotation &ann, const AnnotationData &d)
         auto &t = static_cast<Poppler::TextAnnotation &>(ann);
         t.setTextColor(d.color);
         t.setTextFont(textFont(d.fontSize));
+    } else if (d.kind == AnnotationData::Kind::Ink) {
+        static_cast<Poppler::InkAnnotation &>(ann).setInkPaths(d.paths);
     }
 }
 
@@ -109,6 +114,8 @@ std::unique_ptr<Poppler::Annotation> createAnnotation(const AnnotationData &d)
     std::unique_ptr<Poppler::Annotation> ann;
     if (d.isMarkup()) {
         ann = std::make_unique<Poppler::HighlightAnnotation>();
+    } else if (d.kind == AnnotationData::Kind::Ink) {
+        ann = std::make_unique<Poppler::InkAnnotation>();
     } else if (d.kind == AnnotationData::Kind::Note) {
         auto note = std::make_unique<Poppler::TextAnnotation>(Poppler::TextAnnotation::Linked);
         note->setTextIcon(QStringLiteral("Comment"));
@@ -419,6 +426,10 @@ void Document::refreshAnnotations(int page, const Poppler::Page &p)
             if (d.rects.isEmpty()) {
                 d.rects.append(d.boundary);
             }
+        } else if (ann->subType() == Poppler::Annotation::AInk) {
+            d.kind = AnnotationData::Kind::Ink;
+            d.paths = static_cast<const Poppler::InkAnnotation *>(ann.get())->inkPaths();
+            d.width = ann->style().width();
         } else {
             const auto *t = static_cast<const Poppler::TextAnnotation *>(ann.get());
             if (t->textType() == Poppler::TextAnnotation::InPlace) {

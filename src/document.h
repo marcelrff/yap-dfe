@@ -21,7 +21,7 @@ class Page;
 // One annotation, as plain data. All geometry is normalised to the page:
 // (0,0) is the top-left corner, (1,1) the bottom-right.
 struct AnnotationData {
-    enum class Kind { Highlight, Underline, StrikeOut, Squiggly, Note, Text };
+    enum class Kind { Highlight, Underline, StrikeOut, Squiggly, Note, Text, Ink };
 
     QString id; // unique within the document
     int page = 0;
@@ -31,8 +31,10 @@ struct AnnotationData {
     QList<QRectF> rects; // markup kinds: one rectangle per line of text
     QString contents; // the comment, or the text of a Text annotation
     double fontSize = 12; // Text only, in points
+    QList<QList<QPointF>> paths; // Ink only: the pen strokes
+    double width = 1; // Ink only: pen width in points
 
-    bool isMarkup() const { return kind != Kind::Note && kind != Kind::Text; }
+    bool isMarkup() const { return kind != Kind::Note && kind != Kind::Text && kind != Kind::Ink; }
     bool operator==(const AnnotationData &) const = default;
 };
 

@@ -40,6 +40,7 @@ constexpr int PrerenderPages = 1; // rendered ahead on each side of the viewport
 constexpr int KeepPages = 3; // cached on each side of the viewport
 constexpr double NoteSize = 20; // side of a comment icon, in points
 constexpr double TextSize = 12; // font size of typed text, in points
+constexpr double PenWidth = 2; // width of a pen stroke, in points
 constexpr int EditorInset = 3; // border + document margin of the inline editor
 constexpr int MaxHistory = 100; // remembered jumps
 
@@ -660,8 +661,15 @@ void PdfView::paintEvent(QPaintEvent *event)
         p.drawRect(r.adjusted(-1, -1, 0, 0));
 
         for (const Overlay &o : m_overlays.value(page)) {
-            paintMarkup(p, page, o.kind, o.color, o.rects);
+            if (o.kind == AnnotationData::Kind::Ink) {
+                paintStroke(p, page, o.color, o.stroke);
+            } else {
+                paintMarkup(p, page, o.kind, o.color, o.rects);
+            }
         }
+    }
+    if (m_drag == Drag::Draw) {
+        paintStroke(p, m_strokePage, m_toolColor, m_stroke);
     }
 
     // Text selection: in a markup tool it previews the annotation being made.
@@ -740,6 +748,54 @@ void PdfView::paintMarkup(QPainter &p, int page, AnnotationData::Kind kind, cons
         }
     }
     p.restore();
+}
+
+void PdfView::paintStroke(QPainter &p, int page, const QColor &color, const QList<QPointF> &stroke) const
+{
+    if (stroke.isEmpty()) {
+        return;
+    }
+    const QRect r = m_rects.at(page);
+    QPolygonF line;
+    for (const QPointF &n : stroke) {
+        line.append(QPointF(r.x() + n.x() * r.width(), r.y() + n.y() * r.height()));
+    }
+    if (line.size() == 1) {
+        line.append(line.first()); // a dot
+    }
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(m_dark ? darkened(color) : color, std::max(1.0, PenWidth * pxPerPoint()), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    p.drawPolyline(line);
+    p.restore();
+}
+
+// Turns the stroke just drawn into an annotation of its own, so that each
+// one can be undone, moved and deleted separately.
+void PdfView::finishStroke()
+{
+    const QList<QPointF> stroke = std::exchange(m_stroke, {});
+    const int page = std::exchange(m_strokePage, -1);
+    if (page < 0 || stroke.isEmpty()) {
+        return;
+    }
+    const QSizeF pt = m_doc->pageSize(page);
+    AnnotationData d;
+    d.page = page;
+    d.kind = AnnotationData::Kind::Ink;
+    d.color = m_toolColor;
+    d.width = PenWidth;
+    d.paths = {stroke};
+    if (stroke.size() == 1) {
+        // A click: a dot. A single point would not be drawn at all.
+        d.paths.first().append(stroke.first() + QPointF(0.1 / pt.width(), 0));
+    }
+    const double mx = PenWidth / pt.width(), my = PenWidth / pt.height();
+    d.boundary = QPolygonF(d.paths.first()).boundingRect().adjusted(-mx, -my, mx, my);
+    // Show it right away; the re-rendered page replaces this overlay.
+    m_overlays[page].append({d.kind, d.color, {}, stroke});
+    m_doc->addAnnotation(d);
 }
 
 void PdfView::onPageChanged(int page)
@@ -936,6 +992,11 @@ QColor PdfView::lineColor()
     return QColor(229, 57, 53);
 }
 
+QColor PdfView::penColor()
+{
+    return QColor(229, 57, 53);
+}
+
 QColor PdfView::noteColor()
 {
     return QColor(255, 214, 0);
@@ -961,7 +1022,26 @@ std::optional<AnnotationData> PdfView::annotationAt(int page, QPointF n, bool bl
     // Later annotations are drawn on top; icons and text win over markup.
     std::optional<AnnotationData> markup;
     for (auto it = list.crbegin(); it != list.crend(); ++it) {
-        if (!it->isMarkup()) {
+        if (it->kind == AnnotationData::Kind::Ink) {
+            // On or right next to the line itself, not anywhere in its box.
+            const QSizeF pt = m_doc->pageSize(page);
+            const auto points = [pt](QPointF q) {
+                return QPointF(q.x() * pt.width(), q.y() * pt.height());
+            };
+            const double reach = std::max(4.0, it->width);
+            const QPointF c = points(n);
+            for (const QList<QPointF> &path : it->paths) {
+                for (int i = 0; i + 1 < path.size(); ++i) {
+                    const QPointF a = points(path.at(i)), ab = points(path.at(i + 1)) - a;
+                    const double len2 = QPointF::dotProduct(ab, ab);
+                    const double t = len2 > 0 ? std::clamp(QPointF::dotProduct(c - a, ab) / len2, 0.0, 1.0) : 0.0;
+                    const QPointF d = c - (a + t * ab);
+                    if (QPointF::dotProduct(d, d) <= reach * reach) {
+                        return *it;
+                    }
+                }
+            }
+        } else if (!it->isMarkup()) {
             if (it->boundary.contains(n)) {
                 return *it;
             }
@@ -1423,6 +1503,14 @@ void PdfView::mousePressEvent(QMouseEvent *event)
     case Tool::Note:
         createNote(page, n);
         break;
+    case Tool::Pen:
+        selectAnnotation(-1, QString());
+        clearTextSelection();
+        m_strokePage = page;
+        m_stroke = {n};
+        m_drag = Drag::Draw;
+        viewport()->update();
+        break;
     case Tool::Text: {
         const std::optional<AnnotationData> a = annotationAt(page, n, true);
         if (a && a->kind == AnnotationData::Kind::Text) {
@@ -1502,6 +1590,16 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
     case Drag::MoveAnnot:
         viewport()->update();
         break;
+    case Drag::Draw: {
+        // The stroke stays on the page it began on.
+        const QPointF raw = normalisedIn(m_strokePage, pos);
+        const QPointF n(std::clamp(raw.x(), 0.0, 1.0), std::clamp(raw.y(), 0.0, 1.0));
+        if (n != m_stroke.constLast()) {
+            m_stroke.append(n);
+            viewport()->update();
+        }
+        break;
+    }
     }
 }
 
@@ -1533,6 +1631,9 @@ void PdfView::mouseReleaseEvent(QMouseEvent *event)
         clearTextSelection();
         selectAnnotation(m_pressAnnot->page, m_pressAnnot->id);
         break;
+    case Drag::Draw:
+        finishStroke();
+        break;
     case Drag::PendingLink:
         if (const std::optional<LinkData> link = std::exchange(m_pressLink, std::nullopt)) {
             activateLink(*link);
@@ -1546,6 +1647,12 @@ void PdfView::mouseReleaseEvent(QMouseEvent *event)
             moved.boundary.translate(double(delta.x()) / r.width(), double(delta.y()) / r.height());
             // Keep at least the top-left corner on the page.
             moved.boundary.moveTo(std::clamp(moved.boundary.x(), 0.0, 0.98), std::clamp(moved.boundary.y(), 0.0, 0.98));
+            const QPointF shift = moved.boundary.topLeft() - a->boundary.topLeft();
+            for (QList<QPointF> &path : moved.paths) {
+                for (QPointF &point : path) {
+                    point += shift;
+                }
+            }
             m_doc->updateAnnotation(moved);
         }
         break;
@@ -1666,6 +1773,7 @@ void PdfView::updateCursor(QPoint pos)
             shape = Qt::IBeamCursor;
             break;
         case Tool::Note:
+        case Tool::Pen:
             shape = Qt::CrossCursor;
             break;
         case Tool::Text:

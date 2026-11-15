@@ -1003,7 +1003,7 @@ private Q_SLOTS:
         // Unsaved annotations would not survive the trip: refused, with a hint.
         f.window.openFile(m_a);
         f.left->currentView()->document()->addAnnotation(
-            {QString(), 0, AnnotationData::Kind::Note, Qt::yellow, QRectF(0.1, 0.1, 0.05, 0.05), {}, QStringLiteral("hi"), 12});
+            {QString(), 0, AnnotationData::Kind::Note, Qt::yellow, QRectF(0.1, 0.1, 0.05, 0.05), {}, QStringLiteral("hi"), 12, {}, 1});
         dragTabOut(f.left, f.left->currentIndex());
         QCOMPARE(f.left->count(), 2);
         QCOMPARE(g.left->count(), 2);
@@ -1073,7 +1073,7 @@ private Q_SLOTS:
         QVERIFY(QFile::copy(m_a, copy));
         f.window.openFile(copy);
         const auto doc = f.left->currentView()->document();
-        doc->addAnnotation({QString(), 0, AnnotationData::Kind::Note, Qt::yellow, QRectF(0.1, 0.1, 0.05, 0.05), {}, QStringLiteral("hi"), 12});
+        doc->addAnnotation({QString(), 0, AnnotationData::Kind::Note, Qt::yellow, QRectF(0.1, 0.1, 0.05, 0.05), {}, QStringLiteral("hi"), 12, {}, 1});
         started.clear();
         f.window.saveBeforeDetach = [](const std::shared_ptr<Document> &) { return false; };
         dragTabOut(f.left, f.left->currentIndex());
@@ -1105,6 +1105,96 @@ private Q_SLOTS:
         QCOMPARE(out.page, in.page);
         QCOMPARE(out.fx, in.fx);
         QCOMPARE(out.fy, in.fy);
+    }
+
+    void pen()
+    {
+        const QString copy = m_dir.filePath(QStringLiteral("pen.pdf"));
+        QVERIFY(QFile::copy(m_b, copy));
+        Fixture f;
+        f.window.openFile(copy);
+        PdfView *v = f.left->currentView();
+        const std::shared_ptr<Document> doc = v->document();
+        QTRY_VERIFY(!f.window.isRendering());
+        const auto isRed = [](const QColor &c) {
+            return c.red() > 180 && c.green() < 110 && c.blue() < 110;
+        };
+        const auto colorAt = [v](QPointF n) {
+            return v->viewport()->grab().toImage().pixelColor(v->viewportPoint(0, n));
+        };
+
+        QCOMPARE(action(f.window, QStringLiteral("Pen"))->shortcut(), QKeySequence(Qt::ALT | Qt::Key_0));
+        trigger(f.window, QStringLiteral("Pen"));
+        QCOMPARE(f.window.tool(), PdfView::Tool::Pen);
+
+        // Draw a line across white paper, below the blue band.
+        const QPointF a(0.2, 0.3), b(0.4, 0.3), mid(0.3, 0.3);
+        const auto stroke = [&](QPointF from, QPointF to) {
+            QTest::mousePress(v->viewport(), Qt::LeftButton, {}, v->viewportPoint(0, from));
+            QTest::mouseMove(v->viewport(), v->viewportPoint(0, (from + to) / 2));
+            QVERIFY(isRed(colorAt((from * 3 + to) / 4))); // visible while drawing
+            QTest::mouseMove(v->viewport(), v->viewportPoint(0, to));
+            QTest::mouseRelease(v->viewport(), Qt::LeftButton, {}, v->viewportPoint(0, to));
+        };
+        QCOMPARE(colorAt(mid), QColor(Qt::white));
+        stroke(a, b);
+        QCOMPARE(doc->annotations(0).size(), 1);
+        const AnnotationData ink = doc->annotations(0).first();
+        QCOMPARE(ink.kind, AnnotationData::Kind::Ink);
+        QVERIFY(isRed(ink.color));
+        QCOMPARE(ink.paths.size(), 1);
+        QVERIFY(qAbs(ink.paths.first().first().x() - a.x()) < 0.01);
+        QVERIFY(qAbs(ink.paths.first().last().x() - b.x()) < 0.01);
+        QVERIFY(doc->isModified());
+        QVERIFY(isRed(colorAt(mid))); // shown immediately...
+        QTRY_VERIFY(!f.window.isRendering());
+        QVERIFY(isRed(colorAt(mid))); // ...and in the re-rendered page
+
+        // The tool stays on; every stroke is undone on its own.
+        QCOMPARE(f.window.tool(), PdfView::Tool::Pen);
+        stroke(QPointF(0.2, 0.36), QPointF(0.4, 0.38));
+        QCOMPARE(doc->annotations(0).size(), 2);
+        trigger(f.window, QStringLiteral("Undo"));
+        QCOMPARE(doc->annotations(0).size(), 1);
+        QTRY_VERIFY(!f.window.isRendering());
+        QCOMPARE(colorAt(QPointF(0.3, 0.37)), QColor(Qt::white));
+
+        // Saved as a standard ink annotation, and read back.
+        trigger(f.window, QStringLiteral("Save"));
+        Document::LoadStatus status;
+        const auto reloaded = Document::load(copy, QString(), &status);
+        QCOMPARE(status, Document::LoadStatus::Ok);
+        QCOMPARE(reloaded->annotations(0).size(), 1);
+        const AnnotationData back = reloaded->annotations(0).first();
+        QCOMPARE(back.kind, AnnotationData::Kind::Ink);
+        QVERIFY(isRed(back.color));
+        QCOMPARE(back.paths.size(), 1);
+        QVERIFY(qAbs(back.paths.first().first().x() - a.x()) < 0.01);
+        QVERIFY(qAbs(back.paths.first().first().y() - a.y()) < 0.01);
+        QVERIFY(qAbs(back.width - ink.width) < 0.01);
+
+        // With Select: a click on the line selects it, next to it does not.
+        QTest::keyClick(v, Qt::Key_Escape);
+        QCOMPARE(f.window.tool(), PdfView::Tool::Select);
+        QTest::mouseClick(v->viewport(), Qt::LeftButton, {}, v->viewportPoint(0, QPointF(0.3, 0.36)));
+        QVERIFY(v->selectedAnnotation().isEmpty());
+        QTest::mouseClick(v->viewport(), Qt::LeftButton, {}, v->viewportPoint(0, mid));
+        QCOMPARE(v->selectedAnnotation(), ink.id);
+
+        // Dragging moves the whole stroke.
+        const QPoint from = v->viewportPoint(0, mid), to = v->viewportPoint(0, QPointF(0.3, 0.38));
+        QTest::mousePress(v->viewport(), Qt::LeftButton, {}, from);
+        QTest::mouseMove(v->viewport(), (from + to) / 2);
+        QTest::mouseMove(v->viewport(), to);
+        QTest::mouseRelease(v->viewport(), Qt::LeftButton, {}, to);
+        QVERIFY(qAbs(doc->annotations(0).first().paths.first().first().y() - 0.38) < 0.01);
+        QTRY_VERIFY(!f.window.isRendering());
+        QVERIFY(isRed(colorAt(QPointF(0.3, 0.38))));
+        QCOMPARE(colorAt(mid), QColor(Qt::white));
+
+        trigger(f.window, QStringLiteral("Delete Annotation"));
+        QCOMPARE(doc->annotations(0).size(), 0);
+        f.window.unsavedPrompt = [](const QString &) { return QMessageBox::Discard; };
     }
 
     void links()
