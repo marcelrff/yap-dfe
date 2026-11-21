@@ -1,5 +1,6 @@
 #include "document.h"
 
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
@@ -132,10 +133,35 @@ std::unique_ptr<Poppler::Annotation> createAnnotation(const AnnotationData &d)
     return ann;
 }
 
+// Annotations from other programs often have no name. Address those by an id
+// derived from their content instead of writing a name into them: changing only
+// the dictionary of an annotation whose appearance stream still lives in the
+// file makes Poppler 26.11's font subsetting use freed memory on save
+// (AnnotFreeText::subsetFonts), and it would mark a file modified just by
+// viewing it. The id becomes the annotation's real name once it is edited.
+QString annotationId(const Poppler::Annotation &ann)
+{
+    const QString name = ann.uniqueName();
+    if (!name.isEmpty()) {
+        return name;
+    }
+    const QRectF b = ann.boundary();
+    QStringList key{QString::number(int(ann.subType())),
+                    QString::number(b.x(), 'g', 17),
+                    QString::number(b.y(), 'g', 17),
+                    QString::number(b.width(), 'g', 17),
+                    QString::number(b.height(), 'g', 17),
+                    ann.contents(),
+                    ann.author(),
+                    ann.creationDate().toString(Qt::ISODateWithMs)};
+    const QByteArray hash = QCryptographicHash::hash(key.join(QChar(0x1f)).toUtf8(), QCryptographicHash::Sha1);
+    return QStringLiteral("yapdfe-anon-") + QString::fromLatin1(hash.toHex().left(16));
+}
+
 std::unique_ptr<Poppler::Annotation> findAnnotation(const Poppler::Page &page, const QString &id)
 {
     for (std::unique_ptr<Poppler::Annotation> &ann : page.annotations(SupportedTypes)) {
-        if (ann->uniqueName() == id) {
+        if (annotationId(*ann) == id) {
             return std::move(ann);
         }
     }
@@ -406,13 +432,8 @@ void Document::refreshAnnotations(int page, const Poppler::Page &p)
         if (ann->flags() & Poppler::Annotation::Hidden) {
             continue;
         }
-        // Annotations from other programs often have no name; give them one
-        // so they can be addressed later.
-        if (ann->uniqueName().isEmpty()) {
-            ann->setUniqueName(newId());
-        }
         AnnotationData d;
-        d.id = ann->uniqueName();
+        d.id = annotationId(*ann);
         d.page = page;
         d.boundary = ann->boundary();
         d.contents = ann->contents();
@@ -631,6 +652,9 @@ void Document::applyUpdate(const AnnotationData &data)
         }
         if (const std::unique_ptr<Poppler::Annotation> ann = findAnnotation(*p, data.id)) {
             writeCommon(*ann, data);
+            if (ann->uniqueName().isEmpty()) {
+                ann->setUniqueName(data.id); // keep the id stable now its content changed
+            }
         }
         refreshAnnotations(data.page, *p);
     }
