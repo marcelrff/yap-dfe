@@ -133,6 +133,9 @@ Q_SIGNALS:
     void historyChanged(); // canGoBack() or canGoForward() changed
     // A link points into another PDF; `page` is -1 if it names none.
     void openFileRequested(const QString &path, int page);
+    // The page menu asks to remove or extract pages (0-based).
+    void removePagesRequested(const QList<int> &pages);
+    void extractPagesRequested(const QList<int> &pages);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -181,6 +184,7 @@ private:
     void requestRenders(int delayMs);
     void startRenders();
     void onPageChanged(int page);
+    void onPagesChanged();
 
     // geometry helpers
     bool locate(QPoint viewportPos, int *page, QPointF *normalised) const;

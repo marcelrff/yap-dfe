@@ -60,6 +60,11 @@ public:
     // Asked before a document with unsaved changes moves to a window of its
     // own, which reads it from disk; true means saved. Replaceable for tests.
     std::function<bool(const std::shared_ptr<Document> &doc)> saveBeforeDetach;
+    // Asks which pages to act on, as text like "1-3, 5"; empty means
+    // cancelled. Replaceable for tests.
+    std::function<QString(const QString &title, const QString &label, const QString &text)> pageRangePrompt;
+    // Asks where extracted pages go; empty means cancelled. Replaceable for tests.
+    std::function<QString(const QString &suggested)> extractPathPrompt;
 
     // Starts another yap-dfe process with these arguments. Replaceable so
     // tests can see the arguments instead.
@@ -123,6 +128,9 @@ private:
     void switchTab(int delta);
     void focusOtherPane();
     void goToPageDialog();
+    std::optional<QList<int>> askPages(PdfView *v, const QString &title, const QString &label);
+    void removePages(PdfView *v, const QList<int> &pages);
+    void extractPages(PdfView *v, const QList<int> &pages);
     void setActivePane(int pane);
     void addView(PdfView *view, int pane, int insertAt = -1);
     void normalizePanes();

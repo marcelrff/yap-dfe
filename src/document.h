@@ -9,7 +9,11 @@
 #include <QRectF>
 #include <QSizeF>
 #include <QString>
+#include <QTemporaryDir>
 #include <QUndoStack>
+
+#include <atomic>
+#include <optional>
 
 #include <memory>
 
@@ -83,7 +87,7 @@ public:
 
     QString path() const { return m_path; }
     QString fileName() const;
-    int pageCount() const { return m_sizes.size(); }
+    int pageCount() const { return m_pageCount.load(); } // thread-safe
     QSizeF pageSize(int page) const { return m_sizes.at(page); } // in points
 
     // Renders a whole page into an image of exactly pixelSize. Thread-safe.
@@ -114,6 +118,17 @@ public:
     QUndoStack *undoStack() { return &m_undo; }
     bool isModified() const { return !m_undo.isClean(); }
 
+    // Page lists are 0-based, ascending and without duplicates. Both write
+    // the document with all unsaved changes first.
+    // Writes the given pages to a new file; the document stays as it is.
+    bool extractPages(const QList<int> &pages, const QString &path, QString *error);
+    // Removes the given pages, as one undoable step. Not all of them.
+    bool removePages(const QList<int> &pages, QString *error);
+    // Parses "1-3, 5, 8-" (1-based, "8-" runs to the end) into a page list.
+    static std::optional<QList<int>> parsePageRanges(const QString &text, int pageCount, QString *error);
+    // The inverse, for display: 0-based pages to "1-3, 5".
+    static QString formatPageRanges(const QList<int> &pages);
+
     // Writes the document including all changes. Saving to the current path
     // replaces the file atomically; another path makes that the document's path.
     bool save(const QString &path, QString *error);
@@ -124,20 +139,31 @@ Q_SIGNALS:
     void pageChanged(int page); // the page must be re-rendered
     void modifiedChanged(bool modified);
     void pathChanged();
+    // The pages were replaced (removed, or such a removal undone): page
+    // numbers, sizes and everything cached per page are no longer valid.
+    void pagesChanged();
 
 private:
     friend class AnnotationCommand;
+    friend class PagesCommand;
     Document();
 
     void applyAdd(const AnnotationData &data);
     void applyRemove(int page, const QString &id);
     void applyUpdate(const AnnotationData &data);
+    bool writeTo(const QString &path, QString *error); // the current state, with changes
+    QString workFile(); // a new path in this document's scratch directory
+    bool loadPages(const QString &path); // swaps in another file's pages
     void refreshAnnotations(int page, const Poppler::Page &p); // m_mutex held
     void primeCaches(int page, const Poppler::Page &p); // m_mutex held
 
     QString m_path;
+    QString m_password;
+    std::atomic<int> m_pageCount = 0;
+    std::unique_ptr<QTemporaryDir> m_work; // snapshots behind page removals
+    int m_workCounter = 0;
     std::unique_ptr<Poppler::Document> m_doc;
-    QList<QSizeF> m_sizes;
+    QList<QSizeF> m_sizes; // changed on the GUI thread under m_mutex; workers read it under m_mutex
     QMutex m_mutex; // guards every use of m_doc
 
     mutable QMutex m_cacheMutex;

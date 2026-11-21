@@ -1,6 +1,9 @@
 #include "document.h"
 
 #include <QCryptographicHash>
+#include <QRegularExpression>
+#include <QSet>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
@@ -13,6 +16,8 @@
 #include <poppler-converter.h>
 #include <poppler-link.h>
 #include <poppler-qt6.h>
+
+#include <qpdf/QPDFJob.hh>
 
 #include <algorithm>
 #include <filesystem>
@@ -370,6 +375,8 @@ std::shared_ptr<Document> Document::load(const QString &path, const QString &pas
         return nullptr;
     }
     result->m_doc = std::move(doc);
+    result->m_password = password;
+    result->m_pageCount = n;
     *status = LoadStatus::Ok;
     return result;
 }
@@ -381,10 +388,13 @@ QString Document::fileName() const
 
 QImage Document::render(int page, QSize pixelSize)
 {
-    if (page < 0 || page >= m_sizes.size() || pixelSize.isEmpty()) {
+    if (page < 0 || pixelSize.isEmpty()) {
         return {};
     }
     QMutexLocker lock(&m_mutex);
+    if (page >= m_sizes.size()) {
+        return {}; // pages were removed meanwhile
+    }
     const std::unique_ptr<Poppler::Page> p = m_doc->page(page);
     if (!p) {
         return {};
@@ -542,10 +552,13 @@ QList<LinkData> Document::links(int page)
 QList<QList<QRectF>> Document::search(int page, const QString &text, bool caseSensitive)
 {
     QList<QList<QRectF>> matches;
-    if (page < 0 || page >= m_sizes.size() || text.isEmpty()) {
+    if (page < 0 || text.isEmpty()) {
         return matches;
     }
     QMutexLocker lock(&m_mutex);
+    if (page >= m_sizes.size()) {
+        return matches;
+    }
     const std::unique_ptr<Poppler::Page> p = m_doc->page(page);
     if (!p) {
         return matches;
@@ -713,6 +726,258 @@ void Document::applyUpdate(const AnnotationData &data)
     Q_EMIT pageChanged(data.page);
 }
 
+// --- pages --------------------------------------------------------------------
+
+namespace {
+// Copies `pages` (0-based, ascending) of `in` into a new file `out`, keeping
+// their annotations, links and form fields, using qpdf.
+bool copyPages(const QString &in, const QString &password, const QList<int> &pages, const QString &out, QString *error)
+{
+    QStringList ranges;
+    for (int i = 0; i < pages.size();) {
+        int j = i;
+        while (j + 1 < pages.size() && pages.at(j + 1) == pages.at(j) + 1) {
+            ++j;
+        }
+        ranges.append(i == j ? QString::number(pages.at(i) + 1) : QStringLiteral("%1-%2").arg(pages.at(i) + 1).arg(pages.at(j) + 1));
+        i = j + 1;
+    }
+    std::vector<std::string> args{"qpdf", "--warning-exit-0", "--no-warn", in.toStdString()};
+    if (!password.isEmpty()) {
+        args.push_back("--password=" + password.toStdString());
+    }
+    args.insert(args.end(), {"--pages", ".", ranges.join(QLatin1Char(',')).toStdString(), "--", out.toStdString()});
+    std::vector<const char *> argv;
+    for (const std::string &a : args) {
+        argv.push_back(a.c_str());
+    }
+    argv.push_back(nullptr);
+    try {
+        QPDFJob job;
+        job.initializeFromArgv(argv.data());
+        job.run();
+        if (job.getExitCode() == QPDFJob::EXIT_ERROR) {
+            *error = QCoreApplication::translate("Document", "The pages could not be copied.");
+            return false;
+        }
+    } catch (const std::exception &e) {
+        *error = QCoreApplication::translate("Document", "The pages could not be copied: %1").arg(QString::fromLocal8Bit(e.what()));
+        return false;
+    }
+    return true;
+}
+} // namespace
+
+class PagesCommand : public QUndoCommand
+{
+public:
+    PagesCommand(Document *doc, const QString &before, const QString &after, const QString &text)
+        : QUndoCommand(text)
+        , m_doc(doc)
+        , m_before(before)
+        , m_after(after)
+    {
+    }
+
+    void redo() override { m_doc->loadPages(m_after); }
+    void undo() override { m_doc->loadPages(m_before); }
+
+private:
+    Document *m_doc;
+    QString m_before;
+    QString m_after;
+};
+
+std::optional<QList<int>> Document::parsePageRanges(const QString &text, int pageCount, QString *error)
+{
+    QSet<int> set;
+    QString spec = text;
+    spec.replace(QChar(0x2013), QLatin1Char('-')).replace(QChar(0x2014), QLatin1Char('-'));
+    static const QRegularExpression separators(QStringLiteral("[,;\\s]+"));
+    static const QRegularExpression range(QStringLiteral("^(\\d*)\\s*-\\s*(\\d*)$"));
+    // "3 - 5" is one range: glue the dashes to their numbers first.
+    static const QRegularExpression spacedDash(QStringLiteral("\\s*-\\s*"));
+    spec.replace(spacedDash, QStringLiteral("-"));
+    const QStringList parts = spec.split(separators, Qt::SkipEmptyParts);
+    if (parts.isEmpty()) {
+        *error = tr("Enter pages, for example 1-3, 5, 8-.");
+        return std::nullopt;
+    }
+    for (const QString &part : parts) {
+        int from, to;
+        bool ok = true;
+        if (const QRegularExpressionMatch m = range.match(part); m.hasMatch()) {
+            if (m.captured(1).isEmpty() && m.captured(2).isEmpty()) {
+                ok = false;
+            }
+            from = m.captured(1).isEmpty() ? 1 : m.captured(1).toInt(&ok);
+            to = ok ? (m.captured(2).isEmpty() ? pageCount : m.captured(2).toInt(&ok)) : 0;
+        } else {
+            from = to = part.toInt(&ok);
+        }
+        if (!ok) {
+            *error = tr("“%1” is not a page or page range.").arg(part);
+            return std::nullopt;
+        }
+        if (from > to) {
+            std::swap(from, to);
+        }
+        if (from < 1 || to > pageCount) {
+            *error = tr("Page %1 does not exist; the document has %n page(s).", nullptr, pageCount).arg(from < 1 ? from : to);
+            return std::nullopt;
+        }
+        for (int i = from; i <= to; ++i) {
+            set.insert(i - 1);
+        }
+    }
+    QList<int> pages(set.cbegin(), set.cend());
+    std::sort(pages.begin(), pages.end());
+    return pages;
+}
+
+QString Document::formatPageRanges(const QList<int> &pages)
+{
+    QStringList parts;
+    for (int i = 0; i < pages.size();) {
+        int j = i;
+        while (j + 1 < pages.size() && pages.at(j + 1) == pages.at(j) + 1) {
+            ++j;
+        }
+        parts.append(i == j ? QString::number(pages.at(i) + 1) : QStringLiteral("%1-%2").arg(pages.at(i) + 1).arg(pages.at(j) + 1));
+        i = j + 1;
+    }
+    return parts.join(QStringLiteral(", "));
+}
+
+bool Document::writeTo(const QString &path, QString *error)
+{
+    bool ok;
+    {
+        QMutexLocker lock(&m_mutex);
+        const std::unique_ptr<Poppler::PDFConverter> converter = m_doc->pdfConverter();
+        converter->setOutputFileName(path);
+        converter->setPDFOptions(Poppler::PDFConverter::WithChanges);
+        ok = converter->convert();
+    }
+    if (!ok) {
+        *error = tr("The document could not be written.");
+    }
+    return ok;
+}
+
+QString Document::workFile()
+{
+    if (!m_work) {
+        m_work = std::make_unique<QTemporaryDir>();
+    }
+    return m_work->isValid() ? m_work->filePath(QStringLiteral("%1.pdf").arg(++m_workCounter)) : QString();
+}
+
+bool Document::extractPages(const QList<int> &pages, const QString &path, QString *error)
+{
+    if (pages.isEmpty()) {
+        *error = tr("No pages chosen.");
+        return false;
+    }
+    const QString snapshot = workFile();
+    if (snapshot.isEmpty()) {
+        *error = tr("Cannot create a temporary file.");
+        return false;
+    }
+    const QFileInfo info(path);
+    QTemporaryFile temp(info.absolutePath() + QStringLiteral("/.") + info.fileName() + QStringLiteral(".XXXXXX"));
+    temp.setAutoRemove(false);
+    if (!temp.open()) {
+        QFile::remove(snapshot);
+        *error = tr("Cannot write to %1.").arg(info.absolutePath());
+        return false;
+    }
+    const QString tempName = temp.fileName();
+    temp.close();
+
+    const bool ok = writeTo(snapshot, error) && copyPages(snapshot, m_password, pages, tempName, error);
+    QFile::remove(snapshot);
+    if (!ok) {
+        QFile::remove(tempName);
+        return false;
+    }
+    QFile::setPermissions(tempName, QFile::ReadOwner | QFile::WriteOwner | QFile::ReadGroup | QFile::ReadOther);
+    std::error_code ec;
+    std::filesystem::rename(tempName.toStdString(), info.absoluteFilePath().toStdString(), ec);
+    if (ec) {
+        QFile::remove(tempName);
+        *error = tr("Cannot write %1: %2").arg(path, QString::fromStdString(ec.message()));
+        return false;
+    }
+    return true;
+}
+
+bool Document::removePages(const QList<int> &pages, QString *error)
+{
+    QList<int> keep;
+    for (int i = 0; i < pageCount(); ++i) {
+        if (!pages.contains(i)) {
+            keep.append(i);
+        }
+    }
+    if (keep.isEmpty()) {
+        *error = tr("A document needs at least one page.");
+        return false;
+    }
+    if (keep.size() == pageCount()) {
+        *error = tr("No pages chosen.");
+        return false;
+    }
+    const QString before = workFile(), after = workFile();
+    if (before.isEmpty()) {
+        *error = tr("Cannot create a temporary file.");
+        return false;
+    }
+    if (!writeTo(before, error) || !copyPages(before, m_password, keep, after, error)) {
+        QFile::remove(before);
+        QFile::remove(after);
+        return false;
+    }
+    const int n = pageCount() - keep.size();
+    m_undo.push(new PagesCommand(this, before, after,
+                                 n == 1 ? tr("Remove page %1").arg(pages.first() + 1) : tr("Remove %1 pages").arg(n)));
+    return true;
+}
+
+bool Document::loadPages(const QString &path)
+{
+    const QByteArray pw = m_password.toUtf8();
+    std::unique_ptr<Poppler::Document> doc = Poppler::Document::load(path, pw, pw);
+    if (!doc || doc->isLocked() || doc->numPages() == 0) {
+        qWarning("Cannot load %s", qPrintable(path));
+        return false;
+    }
+    doc->setRenderHint(Poppler::Document::Antialiasing);
+    doc->setRenderHint(Poppler::Document::TextAntialiasing);
+    doc->setRenderHint(Poppler::Document::TextHinting, false);
+    QList<QSizeF> sizes;
+    for (int i = 0; i < doc->numPages(); ++i) {
+        const std::unique_ptr<Poppler::Page> page = doc->page(i);
+        QSizeF size = page ? page->pageSizeF() : QSizeF();
+        if (size.width() < 1 || size.height() < 1) {
+            size = QSizeF(595, 842);
+        }
+        sizes.append(size);
+    }
+    {
+        QMutexLocker lock(&m_mutex);
+        m_doc = std::move(doc);
+        m_sizes = sizes;
+        m_pageCount = sizes.size();
+        QMutexLocker cache(&m_cacheMutex);
+        m_text.clear();
+        m_annots.clear();
+        m_links.clear();
+    }
+    Q_EMIT pagesChanged();
+    return true;
+}
+
 // --- saving -------------------------------------------------------------------
 
 bool Document::save(const QString &path, QString *error)
@@ -733,17 +998,8 @@ bool Document::save(const QString &path, QString *error)
     const QString tempName = temp.fileName();
     temp.close();
 
-    bool ok;
-    {
-        QMutexLocker lock(&m_mutex);
-        const std::unique_ptr<Poppler::PDFConverter> converter = m_doc->pdfConverter();
-        converter->setOutputFileName(tempName);
-        converter->setPDFOptions(Poppler::PDFConverter::WithChanges);
-        ok = converter->convert();
-    }
-    if (!ok) {
+    if (!writeTo(tempName, error)) {
         QFile::remove(tempName);
-        *error = tr("The document could not be written.");
         return false;
     }
 

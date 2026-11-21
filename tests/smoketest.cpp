@@ -223,6 +223,19 @@ private Q_SLOTS:
         const auto doc = Document::load(enc, QStringLiteral("secret"), &status);
         QCOMPARE(status, Document::LoadStatus::Ok);
         QVERIFY(!doc->render(0, QSize(200, 283)).isNull());
+
+        // Page operations work on it too, and their output stays encrypted.
+        QString error;
+        QVERIFY2(doc->removePages({0}, &error), qPrintable(error));
+        QCOMPARE(doc->pageCount(), 5);
+        QVERIFY(!doc->render(0, QSize(200, 283)).isNull());
+        const QString part = m_dir.filePath(QStringLiteral("enc-part.pdf"));
+        QVERIFY2(doc->extractPages({0, 1}, part, &error), qPrintable(error));
+        QVERIFY(!Document::load(part, QString(), &status));
+        QCOMPARE(status, Document::LoadStatus::Locked);
+        const auto partDoc = Document::load(part, QStringLiteral("secret"), &status);
+        QCOMPARE(status, Document::LoadStatus::Ok);
+        QCOMPARE(partDoc->pageCount(), 2);
     }
 
     void tabs()
@@ -1294,6 +1307,125 @@ private Q_SLOTS:
         QVERIFY(qAbs(boundaryOf(b).y() - 0.3) < 0.01);
 
         f.window.unsavedPrompt = [](const QString &) { return QMessageBox::Discard; };
+    }
+
+    void pageRanges()
+    {
+        QString error;
+        const auto parse = [&error](const QString &text, int n) {
+            return Document::parsePageRanges(text, n, &error);
+        };
+        QCOMPARE(parse(QStringLiteral("1-3, 5, 8-"), 10), (QList<int>{0, 1, 2, 4, 7, 8, 9}));
+        QCOMPARE(parse(QStringLiteral("3 - 5"), 10), (QList<int>{2, 3, 4}));
+        QCOMPARE(parse(QStringLiteral("3–5"), 10), (QList<int>{2, 3, 4})); // en dash
+        QCOMPARE(parse(QStringLiteral("-2 2"), 10), (QList<int>{0, 1}));
+        QCOMPARE(parse(QStringLiteral("5-3"), 10), (QList<int>{2, 3, 4}));
+        QVERIFY(!parse(QStringLiteral("0"), 10));
+        QVERIFY(!parse(QStringLiteral("11"), 10));
+        QVERIFY(error.contains(QStringLiteral("11")));
+        QVERIFY(!parse(QStringLiteral("a"), 10));
+        QVERIFY(!parse(QStringLiteral("-"), 10));
+        QVERIFY(!parse(QStringLiteral(" "), 10));
+        QCOMPARE(Document::formatPageRanges({0, 1, 2, 4, 7, 8}), QStringLiteral("1-3, 5, 8-9"));
+    }
+
+    void removeAndExtractPages()
+    {
+        const QString copy = m_dir.filePath(QStringLiteral("pages.pdf"));
+        QVERIFY(QFile::copy(m_a, copy)); // six pages, "A 1" … "A 6"
+        Fixture f;
+        f.window.openFile(copy);
+        f.window.unsavedPrompt = [](const QString &) { return QMessageBox::Discard; };
+        PdfView *v = f.left->currentView();
+        const std::shared_ptr<Document> doc = v->document();
+        QTRY_VERIFY(!f.window.isRendering());
+        const auto label = [](const std::shared_ptr<Document> &d, int page) {
+            QString s;
+            for (const TextChar &c : *d->pageText(page)) {
+                s += c.text;
+            }
+            return s.remove(QLatin1Char(' '));
+        };
+
+        // An unsaved note on page 4 goes along with its page.
+        AnnotationData note;
+        note.page = 3;
+        note.kind = AnnotationData::Kind::Note;
+        note.color = PdfView::noteColor();
+        note.contents = QStringLiteral("on four");
+        note.boundary = QRectF(0.2, 0.3, 0.03, 0.02);
+        doc->addAnnotation(note);
+
+        // A bad answer asks again, saying what was wrong.
+        QStringList answers{QStringLiteral("9"), QStringLiteral("2, 5-")};
+        QStringList labels;
+        f.window.pageRangePrompt = [&](const QString &, const QString &text, const QString &) {
+            labels.append(text);
+            return answers.takeFirst();
+        };
+        trigger(f.window, QStringLiteral("Remove Pages…"));
+        QCOMPARE(labels.size(), 2);
+        QVERIFY(labels.last().contains(QStringLiteral("9")));
+        QCOMPARE(doc->pageCount(), 3);
+        QCOMPARE(v->pageCount(), 3);
+        QCOMPARE(label(doc, 0), QStringLiteral("A1"));
+        QCOMPARE(label(doc, 1), QStringLiteral("A3"));
+        QCOMPARE(label(doc, 2), QStringLiteral("A4"));
+        QCOMPARE(doc->annotations(2).size(), 1);
+        QCOMPARE(doc->annotations(2).first().contents, QStringLiteral("on four"));
+        QVERIFY(doc->isModified());
+        QTRY_VERIFY(!f.window.isRendering());
+
+        // One Undo brings the pages back, and Redo removes them again.
+        trigger(f.window, QStringLiteral("Undo"));
+        QCOMPARE(doc->pageCount(), 6);
+        QCOMPARE(label(doc, 1), QStringLiteral("A2"));
+        QCOMPARE(doc->annotations(3).size(), 1);
+        trigger(f.window, QStringLiteral("Redo"));
+        QCOMPARE(doc->pageCount(), 3);
+        QTRY_VERIFY(!f.window.isRendering());
+
+        // Annotations still work on the new pages.
+        AnnotationData later = note;
+        later.page = 0;
+        later.contents = QStringLiteral("after removal");
+        doc->addAnnotation(later);
+        QCOMPARE(doc->annotations(0).size(), 1);
+
+        // Extract pages 1 and 3 (= "A 1" and "A 4") into a new file.
+        const QString extracted = m_dir.filePath(QStringLiteral("extracted.pdf"));
+        f.window.pageRangePrompt = [](const QString &, const QString &, const QString &) { return QStringLiteral("1, 3"); };
+        QString suggested;
+        f.window.extractPathPrompt = [&](const QString &s) {
+            suggested = s;
+            return extracted;
+        };
+        trigger(f.window, QStringLiteral("Extract Pages…"));
+        QCOMPARE(QFileInfo(suggested).fileName(), QStringLiteral("pages_pages_1_3.pdf"));
+        Document::LoadStatus status;
+        const auto out = Document::load(extracted, QString(), &status);
+        QCOMPARE(status, Document::LoadStatus::Ok);
+        QCOMPARE(out->pageCount(), 2);
+        QCOMPARE(label(out, 0), QStringLiteral("A1"));
+        QCOMPARE(label(out, 1), QStringLiteral("A4"));
+        QCOMPARE(out->annotations(0).size(), 1);
+        QCOMPARE(out->annotations(1).size(), 1);
+        QCOMPARE(doc->pageCount(), 3); // the document itself is unchanged
+
+        // Saving writes the shortened document.
+        trigger(f.window, QStringLiteral("Save"));
+        QVERIFY(!doc->isModified());
+        const auto saved = Document::load(copy, QString(), &status);
+        QCOMPARE(status, Document::LoadStatus::Ok);
+        QCOMPARE(saved->pageCount(), 3);
+        QCOMPARE(label(saved, 2), QStringLiteral("A4"));
+        QCOMPARE(saved->annotations(2).size(), 1);
+
+        // Not every page can go.
+        QString error;
+        QVERIFY(!doc->removePages({0, 1, 2}, &error));
+        QVERIFY(!error.isEmpty());
+        QCOMPARE(doc->pageCount(), 3);
     }
 
     void links()

@@ -13,6 +13,7 @@ endif()
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets Concurrent Network)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(POPPLER_QT6 REQUIRED IMPORTED_TARGET poppler-qt6)
+pkg_check_modules(QPDF REQUIRED IMPORTED_TARGET libqpdf)
 
 add_library(yapdfe_core STATIC
     src/document.cpp
@@ -32,7 +33,7 @@ add_library(yapdfe_core STATIC
 )
 target_include_directories(yapdfe_core PUBLIC src)
 target_compile_options(yapdfe_core PUBLIC -Wall -Wextra)
-target_link_libraries(yapdfe_core PUBLIC Qt6::Widgets Qt6::Concurrent PRIVATE Qt6::Network PkgConfig::POPPLER_QT6)
+target_link_libraries(yapdfe_core PUBLIC Qt6::Widgets Qt6::Concurrent PRIVATE Qt6::Network PkgConfig::POPPLER_QT6 PkgConfig::QPDF)
 
 add_executable(yapdfe src/main.cpp)
 set_target_properties(yapdfe PROPERTIES OUTPUT_NAME "yap-dfe")

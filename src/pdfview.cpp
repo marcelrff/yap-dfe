@@ -211,6 +211,7 @@ PdfView::PdfView(std::shared_ptr<Document> doc, QWidget *parent)
     m_renderTimer.setSingleShot(true);
     connect(&m_renderTimer, &QTimer::timeout, this, &PdfView::startRenders);
     connect(m_doc.get(), &Document::pageChanged, this, &PdfView::onPageChanged);
+    connect(m_doc.get(), &Document::pagesChanged, this, &PdfView::onPagesChanged);
 
     relayout();
 }
@@ -827,6 +828,49 @@ void PdfView::onPageChanged(int page)
     requestRenders(0);
 }
 
+void PdfView::onPagesChanged()
+{
+    // Every page number may now mean another page: drop all that refers to one.
+    for (const Pending &p : std::as_const(m_pending)) {
+        p.cancel->store(true);
+    }
+    m_pending.clear();
+    m_cache.clear();
+    m_stale.clear();
+    m_overlays.clear();
+    if (m_editor) {
+        finishEditor(false);
+    }
+    m_drag = Drag::None;
+    m_pressAnnot.reset();
+    m_pressLink.reset();
+    clearTextSelection();
+    selectAnnotation(-1, QString());
+    m_back.clear();
+    m_forward.clear();
+    Q_EMIT historyChanged();
+
+    const int page = std::min(m_currentPage, m_doc->pageCount() - 1);
+    relayout();
+    verticalScrollBar()->setValue(m_rects.at(page).top() - Margin);
+    m_currentPage = -1;
+    updateCurrentPage();
+
+    // Search again, without jumping to the first match.
+    const QString text = m_searchText;
+    cancelSearch();
+    m_searchText.clear();
+    m_hits.clear();
+    m_hitPage = m_hitIndex = -1;
+    if (!text.isEmpty()) {
+        setSearch(text, m_searchCase);
+        m_hitPage = m_currentPage;
+    }
+    Q_EMIT searchChanged();
+    viewport()->update();
+    requestRenders(0);
+}
+
 // --- geometry helpers ------------------------------------------------------
 
 bool PdfView::locate(QPoint viewportPos, int *page, QPointF *normalised) const
@@ -1396,7 +1440,7 @@ int PdfView::matchCount() const
 
 int PdfView::currentMatch() const
 {
-    if (m_hitPage < 0) {
+    if (m_hitPage < 0 || m_hitIndex < 0) {
         return -1;
     }
     int n = 0;
@@ -1913,7 +1957,12 @@ void PdfView::contextMenuEvent(QContextMenuEvent *event)
             markupSelection(AnnotationData::Kind::StrikeOut, lineColor());
         });
     } else {
-        return;
+        menu.addAction(tr("Remove Page %1").arg(page + 1), this, [this, page] {
+            Q_EMIT removePagesRequested({page});
+        });
+        menu.addAction(tr("Extract Page %1…").arg(page + 1), this, [this, page] {
+            Q_EMIT extractPagesRequested({page});
+        });
     }
     menu.exec(event->globalPos());
 }

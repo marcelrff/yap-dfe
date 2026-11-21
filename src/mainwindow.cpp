@@ -166,13 +166,21 @@ MainWindow::MainWindow(QWidget *parent)
     , m_id(QUuid::createUuid().toString(QUuid::WithoutBraces))
 {
     unsavedPrompt = [this](const QString &fileName) {
-        return QMessageBox::question(this, tr("Unsaved changes"), tr("“%1” has unsaved annotations. Save them before closing?").arg(fileName),
+        return QMessageBox::question(this, tr("Unsaved changes"), tr("“%1” has unsaved changes. Save them before closing?").arg(fileName),
                                      QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    };
+    pageRangePrompt = [this](const QString &title, const QString &label, const QString &text) {
+        bool ok = false;
+        const QString answer = QInputDialog::getText(this, title, label, QLineEdit::Normal, text, &ok);
+        return ok ? answer : QString();
+    };
+    extractPathPrompt = [this](const QString &suggested) {
+        return QFileDialog::getSaveFileName(this, tr("Extract Pages"), suggested, tr("PDF documents (*.pdf)"));
     };
     saveBeforeDetach = [this](const std::shared_ptr<Document> &doc) {
         const auto answer = QMessageBox::question(this, tr("Unsaved changes"),
-                                                  tr("“%1” has unsaved annotations. The new window opens the file as saved on disk. "
-                                                     "Save the annotations first?")
+                                                  tr("“%1” has unsaved changes. The new window opens the file as saved on disk. "
+                                                     "Save them first?")
                                                       .arg(doc->fileName()),
                                                   QMessageBox::Save | QMessageBox::Cancel, QMessageBox::Save);
         return answer == QMessageBox::Save && saveDocument(doc);
@@ -307,6 +315,11 @@ void MainWindow::createActions()
     connect(m_recentMenu, &QMenu::aboutToShow, this, &MainWindow::fillRecentMenu);
     m_saveAction = add(file, tr("&Save"), {QKeySequence::Save}, withView([this](PdfView *v) { saveDocument(v->document()); }));
     m_viewActions << add(file, tr("Save &As…"), {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S)}, [this] { saveAs(); });
+    m_viewActions << add(file, tr("E&xtract Pages…"), {}, withView([this](PdfView *v) {
+        if (const auto pages = askPages(v, tr("Extract Pages"), tr("Pages to extract into a new file"))) {
+            extractPages(v, *pages);
+        }
+    }));
     file->addSeparator();
     m_viewActions << add(file, tr("&Close Tab"), {QKeySequence(Qt::CTRL | Qt::Key_W)}, [this] {
         closeTab(m_active, m_panes[m_active]->currentIndex());
@@ -332,6 +345,12 @@ void MainWindow::createActions()
                          withView([](PdfView *v) { v->selectAllAnnotations(); }));
     m_deleteAction = add(edit, tr("&Delete Annotations"), {QKeySequence(Qt::Key_Delete)},
                          withView([](PdfView *v) { v->deleteSelectedAnnotations(); }));
+    edit->addSeparator();
+    m_viewActions << add(edit, tr("&Remove Pages…"), {}, withView([this](PdfView *v) {
+        if (const auto pages = askPages(v, tr("Remove Pages"), tr("Pages to remove"))) {
+            removePages(v, *pages);
+        }
+    }));
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     m_viewActions << add(view, tr("Zoom &In"), {QKeySequence(Qt::CTRL | Qt::Key_Plus), QKeySequence(Qt::CTRL | Qt::Key_Equal)},
@@ -901,6 +920,13 @@ void MainWindow::addView(PdfView *view, int pane, int insertAt)
         connect(view, &PdfView::searchChanged, this, &MainWindow::updateUi);
         connect(view, &PdfView::historyChanged, this, &MainWindow::updateUi);
         connect(view, &PdfView::openFileRequested, this, &MainWindow::openLinkedFile);
+        connect(view, &PdfView::removePagesRequested, this, [this, view](const QList<int> &pages) {
+            removePages(view, pages);
+        });
+        connect(view, &PdfView::extractPagesRequested, this, [this, view](const QList<int> &pages) {
+            extractPages(view, pages);
+        });
+        connect(doc, &Document::pagesChanged, this, &MainWindow::updateUi);
         view->setDarkMode(m_dark && m_darkPages);
         connect(view, &PdfView::toolFinished, this, [this] {
             setTool(PdfView::Tool::Select, QColor());
@@ -1088,6 +1114,67 @@ void MainWindow::showTabMenu(int pane, int index, const QPoint &globalPos)
         }
     })->setEnabled(m_panes[pane]->count() > 1);
     menu.exec(globalPos);
+}
+
+std::optional<QList<int>> MainWindow::askPages(PdfView *v, const QString &title, const QString &label)
+{
+    const int n = v->pageCount();
+    QString text = QString::number(v->currentPage() + 1);
+    QString problem;
+    for (;;) {
+        QString prompt = tr("%1 (for example 1-3, 5, 8-); the document has %n page(s):", nullptr, n).arg(label);
+        if (!problem.isEmpty()) {
+            prompt = problem + QStringLiteral("\n\n") + prompt;
+        }
+        text = pageRangePrompt(title, prompt, text);
+        if (text.trimmed().isEmpty()) {
+            return std::nullopt;
+        }
+        if (const auto pages = Document::parsePageRanges(text, n, &problem)) {
+            return pages;
+        }
+    }
+}
+
+void MainWindow::removePages(PdfView *v, const QList<int> &pages)
+{
+    const std::shared_ptr<Document> doc = v->document();
+    QString error;
+    if (!doc->removePages(pages, &error)) {
+        QMessageBox::warning(this, tr("Cannot remove pages"), error);
+        return;
+    }
+    statusBar()->showMessage(pages.size() == 1 ? tr("Removed page %1. Ctrl+Z brings it back.").arg(pages.first() + 1)
+                                               : tr("Removed pages %1. Ctrl+Z brings them back.").arg(Document::formatPageRanges(pages)),
+                             5000);
+}
+
+void MainWindow::extractPages(PdfView *v, const QList<int> &pages)
+{
+    const std::shared_ptr<Document> doc = v->document();
+    const QFileInfo info(doc->path());
+    QString label = Document::formatPageRanges(pages);
+    label.remove(QLatin1Char(' ')).replace(QLatin1Char(','), QLatin1Char('_'));
+    const QString suggested = info.dir().filePath(QStringLiteral("%1_pages_%2.pdf").arg(info.completeBaseName(), label));
+    QString path = extractPathPrompt(suggested);
+    if (path.isEmpty()) {
+        return;
+    }
+    if (QFileInfo(path).suffix().isEmpty()) {
+        path += QStringLiteral(".pdf");
+    }
+    path = QFileInfo(path).absoluteFilePath();
+    if (findOpenDocument(path)) {
+        QMessageBox::warning(this, tr("Cannot extract pages"), tr("“%1” is open in a tab. Choose another file.").arg(QFileInfo(path).fileName()));
+        return;
+    }
+    QString error;
+    if (!doc->extractPages(pages, path, &error)) {
+        QMessageBox::warning(this, tr("Cannot extract pages"), error);
+        return;
+    }
+    noteRecentFile(path);
+    statusBar()->showMessage(tr("Extracted %n page(s) to %1", nullptr, pages.size()).arg(QFileInfo(path).fileName()), 5000);
 }
 
 void MainWindow::goToPageDialog()

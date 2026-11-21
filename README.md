@@ -6,7 +6,7 @@ C++20, Qt 6, Poppler.
 
 ## Build
 
-Needs `qt6-base`, `poppler-qt6`, `cmake` and `ninja` (Arch package names).
+Needs `qt6-base`, `poppler-qt6`, `qpdf`, `cmake` and `ninja` (Arch package names).
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -105,6 +105,18 @@ open and brings it to the front. `--new-window` opens a separate one instead.
   recolour highlights) then act on all of them, and Ctrl+Z undoes it in one
   step.
 - Annotations are standard PDF annotations and show up in other viewers.
+
+## Pages
+
+Edit → Remove Pages… and File → Extract Pages… ask for pages like
+`1-3, 5, 8-` (`8-` runs to the last page, `-3` from the first). Right-click
+blank paper on a page to remove or extract just that page.
+
+- Removing pages is an edit like any other: Ctrl+Z brings them back, and the
+  file on disk changes only when you save.
+- Extracting writes the pages, with their annotations (saved or not), to a
+  new PDF and leaves the document as it is.
+- Password-protected files stay protected with the same password.
 
 F8 shows the current document in a second pane at the same position; each
 pane has its own tabs. Right-click a tab for more options. The pane with the
