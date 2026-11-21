@@ -715,16 +715,32 @@ void PdfView::paintEvent(QPaintEvent *event)
         }
     }
 
-    // Outline of the selected annotation, following the mouse while it is moved.
-    if (const std::optional<AnnotationData> a = selectedAnnotationData()) {
-        QRectF r = toContent(a->page, a->boundary).adjusted(-2, -2, 2, 2);
+    // Outlines of the selected annotations; the movable ones follow the mouse
+    // while they are dragged.
+    p.setRenderHint(QPainter::Antialiasing, false);
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(palette().color(QPalette::Highlight), 1.5, Qt::DashLine));
+    for (const AnnotationData &a : selectedAnnotations()) {
+        if (a.isMarkup()) {
+            for (const QRectF &n : a.rects) {
+                p.drawRect(toContent(a.page, n).adjusted(-1, -1, 1, 1));
+            }
+            continue;
+        }
+        QRectF r = toContent(a.page, a.boundary).adjusted(-2, -2, 2, 2);
         if (m_drag == Drag::MoveAnnot) {
             r.translate(m_lastPos - m_pressPos);
         }
-        p.setRenderHint(QPainter::Antialiasing, false);
-        p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(palette().color(QPalette::Highlight), 1.5, Qt::DashLine));
         p.drawRect(r);
+    }
+
+    if (m_drag == Drag::Band) {
+        const QColor c = palette().color(QPalette::Highlight);
+        QColor fill = c;
+        fill.setAlpha(40);
+        p.setPen(QPen(c, 1));
+        p.setBrush(fill);
+        p.drawRect(bandRect());
     }
 }
 
@@ -1057,41 +1073,129 @@ std::optional<AnnotationData> PdfView::annotationAt(int page, QPointF n, bool bl
     return markup;
 }
 
-std::optional<AnnotationData> PdfView::selectedAnnotationData() const
+QList<AnnotationData> PdfView::selectedAnnotations() const
 {
-    if (m_selAnnotId.isEmpty()) {
-        return std::nullopt;
-    }
-    QList<AnnotationData> list;
-    m_doc->cachedAnnotations(m_selAnnotPage, &list);
-    for (const AnnotationData &d : std::as_const(list)) {
-        if (d.id == m_selAnnotId) {
-            return d;
+    QList<AnnotationData> result;
+    QHash<int, QList<AnnotationData>> pages;
+    for (const auto &[page, id] : m_selAnnots) {
+        auto it = pages.find(page);
+        if (it == pages.end()) {
+            QList<AnnotationData> list;
+            m_doc->cachedAnnotations(page, &list);
+            it = pages.insert(page, list);
+        }
+        for (const AnnotationData &d : std::as_const(*it)) {
+            if (d.id == id) {
+                result.append(d);
+                break;
+            }
         }
     }
-    return std::nullopt;
+    return result;
 }
 
-void PdfView::selectAnnotation(int page, const QString &id)
+QString PdfView::selectedAnnotation() const
 {
-    if (m_selAnnotId != id || m_selAnnotPage != page) {
-        m_selAnnotPage = page;
-        m_selAnnotId = id;
+    const QList<AnnotationData> list = selectedAnnotations();
+    return list.isEmpty() ? QString() : list.first().id;
+}
+
+bool PdfView::isAnnotationSelected(const AnnotationData &a) const
+{
+    return m_selAnnots.contains(AnnotKey(a.page, a.id));
+}
+
+void PdfView::setAnnotationSelection(const QList<AnnotKey> &keys)
+{
+    if (m_selAnnots != keys) {
+        m_selAnnots = keys;
         viewport()->update();
         Q_EMIT selectionChanged();
     }
 }
 
-bool PdfView::deleteSelectedAnnotation()
+void PdfView::selectAnnotation(int page, const QString &id)
 {
-    if (!selectedAnnotationData()) {
+    setAnnotationSelection(id.isEmpty() ? QList<AnnotKey>() : QList<AnnotKey>{AnnotKey(page, id)});
+}
+
+void PdfView::selectAllAnnotations()
+{
+    clearTextSelection();
+    QList<AnnotKey> keys;
+    const int n = pageCount();
+    for (int page = 0; page < n; ++page) {
+        for (const AnnotationData &d : m_doc->annotations(page)) {
+            keys.append(AnnotKey(page, d.id));
+        }
+    }
+    setAnnotationSelection(keys);
+}
+
+bool PdfView::deleteSelectedAnnotations()
+{
+    QList<AnnotKey> keys;
+    for (const AnnotationData &d : selectedAnnotations()) {
+        keys.append(AnnotKey(d.page, d.id));
+    }
+    if (keys.isEmpty()) {
         return false;
     }
-    const QString id = m_selAnnotId;
-    const int page = m_selAnnotPage;
     selectAnnotation(-1, QString());
-    m_doc->removeAnnotation(page, id);
+    m_doc->removeAnnotations(keys);
     return true;
+}
+
+QRect PdfView::bandRect() const
+{
+    const QPoint end = m_lastPos + QPoint(horizontalScrollBar()->value(), verticalScrollBar()->value());
+    return QRect(m_bandOrigin, end).normalized();
+}
+
+QList<PdfView::AnnotKey> PdfView::annotationsIn(const QRect &content) const
+{
+    QList<AnnotKey> keys;
+    for (int page = 0; page < m_rects.size(); ++page) {
+        const QRect r = m_rects.at(page);
+        if (!r.intersects(content)) {
+            continue;
+        }
+        const QRect c = r.intersected(content);
+        const QRectF n(double(c.x() - r.x()) / r.width(), double(c.y() - r.y()) / r.height(),
+                       double(c.width()) / r.width(), double(c.height()) / r.height());
+        for (const AnnotationData &d : m_doc->annotations(page)) {
+            bool hit = false;
+            if (d.isMarkup()) {
+                for (const QRectF &q : d.rects) {
+                    hit = hit || q.intersects(n);
+                }
+            } else if (d.kind == AnnotationData::Kind::Ink) {
+                for (const QList<QPointF> &path : d.paths) {
+                    for (const QPointF &point : path) {
+                        hit = hit || n.contains(point);
+                    }
+                }
+            } else {
+                hit = d.boundary.intersects(n);
+            }
+            if (hit) {
+                keys.append(AnnotKey(page, d.id));
+            }
+        }
+    }
+    return keys;
+}
+
+void PdfView::updateBand()
+{
+    QList<AnnotKey> keys = m_bandBase;
+    for (const AnnotKey &k : annotationsIn(bandRect())) {
+        if (!keys.contains(k)) {
+            keys.append(k);
+        }
+    }
+    setAnnotationSelection(keys);
+    viewport()->update();
 }
 
 void PdfView::editAnnotation(const AnnotationData &annotation)
@@ -1404,7 +1508,7 @@ void PdfView::keyPressEvent(QKeyEvent *event)
     switch (event->key()) {
     case Qt::Key_Escape:
         // Esc backs out one step at a time: selection first, then the tool.
-        if (hasTextSelection() || !m_selAnnotId.isEmpty()) {
+        if (hasTextSelection() || !m_selAnnots.isEmpty()) {
             clearTextSelection();
             selectAnnotation(-1, QString());
         } else {
@@ -1463,14 +1567,36 @@ void PdfView::mousePressEvent(QMouseEvent *event)
 
     switch (m_tool) {
     case Tool::Select: {
+        const bool shift = event->modifiers() & Qt::ShiftModifier;
+        const bool additive = shift || (event->modifiers() & Qt::ControlModifier);
         if (const std::optional<AnnotationData> a = annotationAt(page, n, true)) {
+            if (additive) {
+                // Ctrl/Shift+click adds it to the selection or takes it out.
+                clearTextSelection();
+                QList<AnnotKey> keys = m_selAnnots;
+                const AnnotKey key(a->page, a->id);
+                if (!keys.removeOne(key)) {
+                    keys.append(key);
+                }
+                setAnnotationSelection(keys);
+                return;
+            }
             // A click selects it; what a drag does is decided once it starts.
             m_pressAnnot = a;
             m_drag = Drag::PendingAnnot;
             return;
         }
-        selectAnnotation(-1, QString());
         clearTextSelection();
+        if (shift) {
+            // Shift+drag selects annotations by area even over text.
+            m_bandBase = m_selAnnots;
+            m_bandOrigin = pos + QPoint(horizontalScrollBar()->value(), verticalScrollBar()->value());
+            m_drag = Drag::Band;
+            return;
+        }
+        if (!additive) {
+            selectAnnotation(-1, QString());
+        }
         if (const std::optional<LinkData> link = linkAt(page, n, true)) {
             // A click follows it; a drag still selects the text or pans.
             m_pressLink = link;
@@ -1478,12 +1604,15 @@ void PdfView::mousePressEvent(QMouseEvent *event)
             return;
         }
         const int c = charAt(*m_doc->pageText(page), page, n, false);
-        if (c >= 0) {
+        if (c >= 0 && !additive) {
             m_selPage = page;
             m_selAnchor = c;
             m_drag = Drag::SelectText;
         } else {
-            startPan(event);
+            // Blank paper: drag a rectangle to select annotations.
+            m_bandBase = m_selAnnots;
+            m_bandOrigin = pos + QPoint(horizontalScrollBar()->value(), verticalScrollBar()->value());
+            m_drag = Drag::Band;
         }
         break;
     }
@@ -1567,7 +1696,10 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
             break;
         }
         if (!m_pressAnnot->isMarkup()) {
-            selectAnnotation(m_pressAnnot->page, m_pressAnnot->id);
+            // Dragging one of several selected annotations moves them all.
+            if (!isAnnotationSelected(*m_pressAnnot)) {
+                selectAnnotation(m_pressAnnot->page, m_pressAnnot->id);
+            }
             clearTextSelection();
             m_drag = Drag::MoveAnnot;
             viewport()->update();
@@ -1589,6 +1721,9 @@ void PdfView::mouseMoveEvent(QMouseEvent *event)
     }
     case Drag::MoveAnnot:
         viewport()->update();
+        break;
+    case Drag::Band:
+        updateBand();
         break;
     case Drag::Draw: {
         // The stroke stays on the page it began on.
@@ -1639,22 +1774,32 @@ void PdfView::mouseReleaseEvent(QMouseEvent *event)
             activateLink(*link);
         }
         break;
-    case Drag::MoveAnnot:
-        if (const std::optional<AnnotationData> a = selectedAnnotationData()) {
-            const QRect r = m_rects.at(a->page);
-            const QPoint delta = pos - m_pressPos;
-            AnnotationData moved = *a;
+    case Drag::MoveAnnot: {
+        const QPoint delta = pos - m_pressPos;
+        QList<AnnotationData> list;
+        for (const AnnotationData &a : selectedAnnotations()) {
+            if (a.isMarkup()) {
+                continue; // markup belongs to its text
+            }
+            const QRect r = m_rects.at(a.page);
+            AnnotationData moved = a;
             moved.boundary.translate(double(delta.x()) / r.width(), double(delta.y()) / r.height());
             // Keep at least the top-left corner on the page.
             moved.boundary.moveTo(std::clamp(moved.boundary.x(), 0.0, 0.98), std::clamp(moved.boundary.y(), 0.0, 0.98));
-            const QPointF shift = moved.boundary.topLeft() - a->boundary.topLeft();
+            const QPointF shift = moved.boundary.topLeft() - a.boundary.topLeft();
             for (QList<QPointF> &path : moved.paths) {
                 for (QPointF &point : path) {
                     point += shift;
                 }
             }
-            m_doc->updateAnnotation(moved);
+            list.append(moved);
         }
+        m_doc->updateAnnotations(list);
+        break;
+    }
+    case Drag::Band:
+        updateBand();
+        m_bandBase.clear();
         break;
     default:
         break;
@@ -1708,7 +1853,33 @@ void PdfView::contextMenuEvent(QContextMenuEvent *event)
         return;
     }
     QMenu menu(this);
-    if (const std::optional<AnnotationData> a = annotationAt(page, n, true)) {
+    const std::optional<AnnotationData> a = annotationAt(page, n, true);
+    const QList<AnnotationData> selected = selectedAnnotations();
+    if (a && isAnnotationSelected(*a) && selected.size() > 1) {
+        // Acts on the whole selection.
+        QList<AnnotationData> highlights;
+        for (const AnnotationData &d : selected) {
+            if (d.kind == AnnotationData::Kind::Highlight) {
+                highlights.append(d);
+            }
+        }
+        if (!highlights.isEmpty()) {
+            QMenu *colors = menu.addMenu(highlights.size() == 1 ? tr("Colour") : tr("Colour of %1 Highlights").arg(highlights.size()));
+            for (const auto &[name, color] : highlightColors()) {
+                colors->addAction(name, this, [this, highlights, color = color] {
+                    QList<AnnotationData> list = highlights;
+                    for (AnnotationData &d : list) {
+                        d.color = color;
+                    }
+                    m_doc->updateAnnotations(list);
+                });
+            }
+            menu.addSeparator();
+        }
+        menu.addAction(tr("Delete %1 Annotations").arg(selected.size()), this, [this] {
+            deleteSelectedAnnotations();
+        });
+    } else if (a) {
         selectAnnotation(a->page, a->id);
         menu.addAction(a->kind == AnnotationData::Kind::Text ? tr("Edit Text") : tr("Edit Comment…"), this, [this, a] {
             editAnnotation(*a);
@@ -1725,7 +1896,7 @@ void PdfView::contextMenuEvent(QContextMenuEvent *event)
         }
         menu.addSeparator();
         menu.addAction(tr("Delete"), this, [this] {
-            deleteSelectedAnnotation();
+            deleteSelectedAnnotations();
         });
     } else if (hasTextSelection()) {
         menu.addAction(tr("Copy"), this, &PdfView::copySelection);

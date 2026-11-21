@@ -328,8 +328,10 @@ void MainWindow::createActions()
     m_viewActions << add(edit, tr("Find &Next"), {QKeySequence(Qt::Key_F3)}, withView([](PdfView *v) { v->findNext(true); }));
     m_viewActions << add(edit, tr("Find &Previous"), {QKeySequence(Qt::SHIFT | Qt::Key_F3)}, withView([](PdfView *v) { v->findNext(false); }));
     edit->addSeparator();
-    m_deleteAction = add(edit, tr("&Delete Annotation"), {QKeySequence(Qt::Key_Delete)},
-                         withView([](PdfView *v) { v->deleteSelectedAnnotation(); }));
+    m_viewActions << add(edit, tr("Select &All Annotations"), {QKeySequence::SelectAll},
+                         withView([](PdfView *v) { v->selectAllAnnotations(); }));
+    m_deleteAction = add(edit, tr("&Delete Annotations"), {QKeySequence(Qt::Key_Delete)},
+                         withView([](PdfView *v) { v->deleteSelectedAnnotations(); }));
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     m_viewActions << add(view, tr("Zoom &In"), {QKeySequence(Qt::CTRL | Qt::Key_Plus), QKeySequence(Qt::CTRL | Qt::Key_Equal)},
@@ -1183,7 +1185,7 @@ void MainWindow::updateUi()
     m_copyAction->setEnabled(v && v->hasTextSelection());
     m_backAction->setEnabled(v && v->canGoBack());
     m_forwardAction->setEnabled(v && v->canGoForward());
-    m_deleteAction->setEnabled(v && !v->selectedAnnotation().isEmpty());
+    m_deleteAction->setEnabled(v && !v->selectedAnnotations().isEmpty());
     for (const auto &[action, def] : std::as_const(m_toolActions)) {
         action->setChecked(def.first == m_tool && def.second == m_toolColor);
     }

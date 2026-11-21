@@ -31,7 +31,7 @@ ctest --test-dir build                        # offscreen smoke test
 | Go to page | Ctrl+G |
 | First / last page | Ctrl+Home / Ctrl+End |
 | Back / forward (after a link or jump) | Alt+Left / Alt+Right, mouse back / forward buttons |
-| Scroll | wheel, drag, arrows, PgUp/PgDn, Space |
+| Scroll | wheel, middle-button drag, drag beside the pages, arrows, PgUp/PgDn, Space |
 | Find | Ctrl+F (searches for the selected text, if any) |
 | Next / previous match | Enter / Shift+Enter in the find bar, F3 / Shift+F3 |
 | Dark mode | Ctrl+D |
@@ -83,7 +83,8 @@ open and brings it to the front. `--new-window` opens a separate one instead.
 | Pen (red) | Alt+0 |
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z |
 | Copy selected text | Ctrl+C |
-| Delete selected annotation | Del |
+| Select all annotations | Ctrl+A |
+| Delete selected annotations | Del |
 | Save / save as | Ctrl+S / Ctrl+Shift+S |
 | Back to Select | Esc |
 
@@ -98,6 +99,11 @@ open and brings it to the front. `--new-window` opens a separate one instead.
   a stroke can be clicked (on the line), dragged elsewhere or deleted.
 - In Select, click an annotation to select it, drag comments and text to move
   them, right-click for more (recolour, delete).
+- Select several: drag a rectangle from blank paper (Shift+drag works over
+  text too and adds to the selection), Ctrl+click or Shift+click to add or
+  remove one, Ctrl+A for all. Del, dragging and right-click (delete,
+  recolour highlights) then act on all of them, and Ctrl+Z undoes it in one
+  step.
 - Annotations are standard PDF annotations and show up in other viewers.
 
 F8 shows the current document in a second pane at the same position; each

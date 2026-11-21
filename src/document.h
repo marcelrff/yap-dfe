@@ -107,6 +107,9 @@ public:
     QString addAnnotation(AnnotationData data);
     void removeAnnotation(int page, const QString &id);
     void updateAnnotation(const AnnotationData &data);
+    // Several at once, undone as one step. Items are (page, id).
+    void removeAnnotations(const QList<QPair<int, QString>> &items);
+    void updateAnnotations(const QList<AnnotationData> &list);
 
     QUndoStack *undoStack() { return &m_undo; }
     bool isModified() const { return !m_undo.isClean(); }

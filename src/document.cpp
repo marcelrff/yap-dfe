@@ -611,6 +611,58 @@ void Document::updateAnnotation(const AnnotationData &data)
     }
 }
 
+void Document::removeAnnotations(const QList<QPair<int, QString>> &items)
+{
+    if (items.size() == 1) {
+        removeAnnotation(items.first().first, items.first().second);
+        return;
+    }
+    QList<AnnotationData> found;
+    for (const auto &[page, id] : items) {
+        for (const AnnotationData &d : annotations(page)) {
+            if (d.id == id) {
+                found.append(d);
+                break;
+            }
+        }
+    }
+    if (found.isEmpty()) {
+        return;
+    }
+    m_undo.beginMacro(tr("Delete %1 annotations").arg(found.size()));
+    for (const AnnotationData &d : std::as_const(found)) {
+        m_undo.push(new AnnotationCommand(this, d, {}, tr("Delete annotation")));
+    }
+    m_undo.endMacro();
+}
+
+void Document::updateAnnotations(const QList<AnnotationData> &list)
+{
+    if (list.size() == 1) {
+        updateAnnotation(list.first());
+        return;
+    }
+    QList<QPair<AnnotationData, AnnotationData>> changes;
+    for (const AnnotationData &data : list) {
+        for (const AnnotationData &d : annotations(data.page)) {
+            if (d.id == data.id) {
+                if (d != data) {
+                    changes.append({d, data});
+                }
+                break;
+            }
+        }
+    }
+    if (changes.isEmpty()) {
+        return;
+    }
+    m_undo.beginMacro(tr("Edit %1 annotations").arg(changes.size()));
+    for (const auto &[before, after] : std::as_const(changes)) {
+        m_undo.push(new AnnotationCommand(this, before, after, tr("Edit annotation")));
+    }
+    m_undo.endMacro();
+}
+
 void Document::applyAdd(const AnnotationData &data)
 {
     {

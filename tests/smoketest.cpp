@@ -499,9 +499,9 @@ private Q_SLOTS:
         PdfView::commentEditor = savedEditor;
 
         // Delete the selected comment.
-        trigger(f.window, QStringLiteral("Delete Annotation"));
+        trigger(f.window, QStringLiteral("Delete Annotations"));
         QCOMPARE(doc->annotations(0).size(), 1);
-        QVERIFY(!action(f.window, QStringLiteral("Delete Annotation"))->isEnabled());
+        QVERIFY(!action(f.window, QStringLiteral("Delete Annotations"))->isEnabled());
 
         // Text: click, type, Enter.
         trigger(f.window, QStringLiteral("Text"));
@@ -1192,8 +1192,107 @@ private Q_SLOTS:
         QVERIFY(isRed(colorAt(QPointF(0.3, 0.38))));
         QCOMPARE(colorAt(mid), QColor(Qt::white));
 
-        trigger(f.window, QStringLiteral("Delete Annotation"));
+        trigger(f.window, QStringLiteral("Delete Annotations"));
         QCOMPARE(doc->annotations(0).size(), 0);
+        f.window.unsavedPrompt = [](const QString &) { return QMessageBox::Discard; };
+    }
+
+    void multiSelect()
+    {
+        const QString copy = m_dir.filePath(QStringLiteral("multi.pdf"));
+        QVERIFY(QFile::copy(m_b, copy));
+        Fixture f;
+        f.window.openFile(copy);
+        PdfView *v = f.left->currentView();
+        const std::shared_ptr<Document> doc = v->document();
+        QTRY_VERIFY(!f.window.isRendering());
+
+        // Three notes on white paper below the blue band.
+        const auto addNote = [&](QPointF at) {
+            AnnotationData d;
+            d.kind = AnnotationData::Kind::Note;
+            d.color = PdfView::noteColor();
+            d.contents = QStringLiteral("note");
+            d.boundary = QRectF(at, QSizeF(0.03, 0.02));
+            return doc->addAnnotation(d);
+        };
+        const QString a = addNote(QPointF(0.2, 0.3)), b = addNote(QPointF(0.4, 0.3)), c = addNote(QPointF(0.7, 0.3));
+        QTRY_VERIFY(!f.window.isRendering());
+        const auto ids = [v] {
+            QStringList list;
+            for (const AnnotationData &d : v->selectedAnnotations()) {
+                list.append(d.id);
+            }
+            list.sort();
+            return list;
+        };
+        const auto sorted = [](QStringList list) {
+            list.sort();
+            return list;
+        };
+        const auto drag = [v](QPointF from, QPointF to, Qt::KeyboardModifiers mods = {}) {
+            const QPoint p = v->viewportPoint(0, from), q = v->viewportPoint(0, to);
+            QTest::mousePress(v->viewport(), Qt::LeftButton, mods, p);
+            QTest::mouseMove(v->viewport(), (p + q) / 2);
+            QTest::mouseMove(v->viewport(), q);
+            QTest::mouseRelease(v->viewport(), Qt::LeftButton, mods, q);
+        };
+        QAction *del = action(f.window, QStringLiteral("Delete Annotations"));
+        QVERIFY(!del->isEnabled());
+
+        // A rectangle dragged from blank paper selects what it touches.
+        drag(QPointF(0.1, 0.27), QPointF(0.5, 0.34));
+        QCOMPARE(ids(), sorted({a, b}));
+        QVERIFY(del->isEnabled());
+
+        // Ctrl+click adds and removes single annotations.
+        const QPoint onC = v->viewportPoint(0, QPointF(0.715, 0.31));
+        QTest::mouseClick(v->viewport(), Qt::LeftButton, Qt::ControlModifier, onC);
+        QCOMPARE(ids(), sorted({a, b, c}));
+        QTest::mouseClick(v->viewport(), Qt::LeftButton, Qt::ControlModifier, onC);
+        QCOMPARE(ids(), sorted({a, b}));
+
+        // Shift+drag adds to the selection.
+        drag(QPointF(0.65, 0.27), QPointF(0.8, 0.34), Qt::ShiftModifier);
+        QCOMPARE(ids(), sorted({a, b, c}));
+
+        // A plain click on blank paper clears; Ctrl+A selects everything.
+        QTest::mouseClick(v->viewport(), Qt::LeftButton, {}, v->viewportPoint(0, QPointF(0.5, 0.4)));
+        QVERIFY(ids().isEmpty());
+        trigger(f.window, QStringLiteral("Select All Annotations"));
+        QCOMPARE(ids(), sorted({a, b, c}));
+        QTest::keyClick(v, Qt::Key_Escape);
+        QVERIFY(ids().isEmpty());
+
+        // Dragging one of the selected moves them all, undone in one step.
+        drag(QPointF(0.1, 0.27), QPointF(0.5, 0.34));
+        const int undoBefore = doc->undoStack()->count();
+        drag(QPointF(0.215, 0.31), QPointF(0.215, 0.41));
+        QCOMPARE(doc->undoStack()->count(), undoBefore + 1);
+        const auto boundaryOf = [doc](const QString &id) {
+            for (const AnnotationData &d : doc->annotations(0)) {
+                if (d.id == id) {
+                    return d.boundary;
+                }
+            }
+            return QRectF();
+        };
+        QVERIFY(qAbs(boundaryOf(a).y() - 0.4) < 0.01);
+        QVERIFY(qAbs(boundaryOf(b).y() - 0.4) < 0.01);
+        QVERIFY(qAbs(boundaryOf(c).y() - 0.3) < 0.01);
+        QCOMPARE(ids(), sorted({a, b}));
+
+        // Delete removes all of them; one Undo brings them all back.
+        trigger(f.window, QStringLiteral("Delete Annotations"));
+        QCOMPARE(doc->annotations(0).size(), 1);
+        QVERIFY(ids().isEmpty());
+        QVERIFY(!del->isEnabled());
+        trigger(f.window, QStringLiteral("Undo"));
+        QCOMPARE(doc->annotations(0).size(), 3);
+        trigger(f.window, QStringLiteral("Undo"));
+        QVERIFY(qAbs(boundaryOf(a).y() - 0.3) < 0.01);
+        QVERIFY(qAbs(boundaryOf(b).y() - 0.3) < 0.01);
+
         f.window.unsavedPrompt = [](const QString &) { return QMessageBox::Discard; };
     }
 

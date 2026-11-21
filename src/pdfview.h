@@ -86,8 +86,13 @@ public:
     // Turns the current text selection into a markup annotation.
     bool markupSelection(AnnotationData::Kind kind, const QColor &color);
 
-    QString selectedAnnotation() const { return m_selAnnotId; }
-    bool deleteSelectedAnnotation();
+    // Annotation selection: a click picks one, Ctrl/Shift+click adds or
+    // removes one, a drag from blank paper (or Shift+drag anywhere) selects
+    // everything the rectangle touches.
+    QString selectedAnnotation() const; // the first selected, or empty
+    QList<AnnotationData> selectedAnnotations() const;
+    void selectAllAnnotations();
+    bool deleteSelectedAnnotations();
 
     // --- search ---
     // Starts searching the whole document in the background; matches come
@@ -159,7 +164,8 @@ private:
         QList<QRectF> rects;
         QList<QPointF> stroke = {}; // Ink: the pen stroke
     };
-    enum class Drag { None, Pan, SelectText, PendingAnnot, MoveAnnot, PendingLink, Draw };
+    enum class Drag { None, Pan, SelectText, PendingAnnot, MoveAnnot, PendingLink, Draw, Band };
+    using AnnotKey = QPair<int, QString>; // page, id
 
     double pxPerPoint() const;
     void relayout();
@@ -193,8 +199,12 @@ private:
 
     // annotations
     std::optional<AnnotationData> annotationAt(int page, QPointF normalised, bool blocking) const;
-    std::optional<AnnotationData> selectedAnnotationData() const;
-    void selectAnnotation(int page, const QString &id);
+    void selectAnnotation(int page, const QString &id); // just this one; an empty id clears
+    void setAnnotationSelection(const QList<AnnotKey> &keys);
+    bool isAnnotationSelected(const AnnotationData &a) const;
+    QRect bandRect() const; // content coordinates
+    QList<AnnotKey> annotationsIn(const QRect &content) const;
+    void updateBand();
     void editAnnotation(const AnnotationData &annotation);
     void createNote(int page, QPointF normalised);
     void openEditor(int page, QPointF topLeft, const std::optional<AnnotationData> &existing);
@@ -240,8 +250,9 @@ private:
     int m_selAnchor = -1;
     int m_selCursor = -1;
 
-    int m_selAnnotPage = -1;
-    QString m_selAnnotId;
+    QList<AnnotKey> m_selAnnots;
+    QList<AnnotKey> m_bandBase; // selection kept while a band is dragged
+    QPoint m_bandOrigin; // content coordinates
 
     struct PageHits {
         int page;
