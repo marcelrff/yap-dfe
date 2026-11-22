@@ -127,6 +127,9 @@ public:
     // Turns pages by `degrees` (a multiple of 90, positive is clockwise), as
     // one undoable step.
     bool rotatePages(const QList<int> &pages, int degrees, QString *error);
+    // Deletes the text under `rects` (normalised) on a page from the PDF
+    // itself, as one undoable step. Everything else stays where it is.
+    bool removeText(int page, const QList<QRectF> &rects, QString *error);
     // Parses "1-3, 5, 8-" (1-based, "8-" runs to the end) into a page list.
     static std::optional<QList<int>> parsePageRanges(const QString &text, int pageCount, QString *error);
     // The inverse, for display: 0-based pages to "1-3, 5".

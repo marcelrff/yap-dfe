@@ -137,6 +137,7 @@ private:
     void extractPages(PdfView *v, const QList<int> &pages);
     void rotatePages(PdfView *v, const QList<int> &pages, int degrees);
     void rotatePagesDialog(PdfView *v);
+    void removeSelectedText(PdfView *v);
     void setActivePane(int pane);
     void addView(PdfView *view, int pane, int insertAt = -1);
     void normalizePanes();
@@ -184,6 +185,7 @@ private:
     QAction *m_redoAction = nullptr;
     QAction *m_saveAction = nullptr;
     QAction *m_copyAction = nullptr;
+    QAction *m_removeTextAction = nullptr;
     QAction *m_deleteAction = nullptr;
     QAction *m_splitAction = nullptr;
     QAction *m_fitWidthAction = nullptr;

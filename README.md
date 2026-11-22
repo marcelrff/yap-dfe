@@ -2,11 +2,15 @@
 
 Yet Another P-DF Editor: tabbed, with side-by-side panes in one window,
 annotations, search and a dark mode.
-C++20, Qt 6, Poppler.
+C++20, Qt 6, Poppler, qpdf and MuPDF.
 
 ## Build
 
-Needs `qt6-base`, `poppler-qt6`, `qpdf`, `cmake` and `ninja` (Arch package names).
+Needs `qt6-base`, `poppler-qt6`, `qpdf`, `libmupdf`, `cmake` and `ninja` (Arch
+package names).
+
+Linking MuPDF (AGPL-3.0) together with Poppler (GPL) puts the yap-dfe binary
+under the AGPL-3.0.
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -83,6 +87,7 @@ open and brings it to the front. `--new-window` opens a separate one instead.
 | Pen (red) | Alt+0 |
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z |
 | Copy selected text | Ctrl+C |
+| Remove selected text from the PDF | Shift+Del |
 | Select all annotations | Ctrl+A |
 | Delete selected annotations | Del |
 | Save / save as | Ctrl+S / Ctrl+Shift+S |
@@ -106,6 +111,10 @@ open and brings it to the front. `--new-window` opens a separate one instead.
   recolour highlights) then act on all of them, and Ctrl+Z undoes it in one
   step.
 - Annotations are standard PDF annotations and show up in other viewers.
+- Remove Selected Text (Shift+Del, or right-click a selection) deletes the
+  selected characters from the PDF itself: they cannot be copied, searched
+  or recovered afterwards. Nothing moves up to fill the gap; images, lines
+  and annotations stay. Like other edits, it can be undone with Ctrl+Z.
 
 ## Pages
 

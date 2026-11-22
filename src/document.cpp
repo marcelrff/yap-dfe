@@ -1,4 +1,5 @@
 #include "document.h"
+#include "redact.h"
 
 #include <QCryptographicHash>
 #include <QRegularExpression>
@@ -970,6 +971,37 @@ bool Document::rotatePages(const QList<int> &pages, int degrees, QString *error)
     }
     m_undo.push(new PagesCommand(this, before, after,
                                  pages.size() == 1 ? tr("Rotate page %1").arg(pages.first() + 1) : tr("Rotate %1 pages").arg(pages.size())));
+    return true;
+}
+
+bool Document::removeText(int page, const QList<QRectF> &rects, QString *error)
+{
+    if (page < 0 || page >= pageCount() || rects.isEmpty()) {
+        *error = tr("No text chosen.");
+        return false;
+    }
+    const QString before = workFile(), after = workFile();
+    if (before.isEmpty()) {
+        *error = tr("Cannot create a temporary file.");
+        return false;
+    }
+    if (!writeTo(before, error)) {
+        QFile::remove(before);
+        return false;
+    }
+    std::vector<double> flat;
+    for (const QRectF &r : rects) {
+        flat.insert(flat.end(), {r.x(), r.y(), r.width(), r.height()});
+    }
+    char message[512] = {};
+    if (!redactText(QFile::encodeName(before).constData(), m_password.toUtf8().constData(), page, flat.data(), int(rects.size()),
+                    QFile::encodeName(after).constData(), message, sizeof message)) {
+        QFile::remove(before);
+        QFile::remove(after);
+        *error = tr("The text could not be removed: %1").arg(QString::fromUtf8(message));
+        return false;
+    }
+    m_undo.push(new PagesCommand(this, before, after, tr("Remove text")));
     return true;
 }
 

@@ -1010,6 +1010,32 @@ void PdfView::copySelection() const
     }
 }
 
+bool PdfView::removeSelectedText(QString *error)
+{
+    if (!hasTextSelection()) {
+        *error = tr("No text is selected.");
+        return false;
+    }
+    const auto text = m_doc->pageText(m_selPage);
+    const auto [from, to] = selectionRange();
+    // The middle of each character only: MuPDF removes every glyph its area
+    // touches at all, and neighbouring glyph boxes often overlap a little.
+    QList<QRectF> rects;
+    for (int i = from; i <= to && i < text->size(); ++i) {
+        const QRectF r = text->at(i).rect;
+        if (r.width() > 0 && r.height() > 0) {
+            rects.append(r.adjusted(r.width() * 0.3, r.height() * 0.3, -r.width() * 0.3, -r.height() * 0.3));
+        }
+    }
+    const int page = m_selPage;
+    if (rects.isEmpty()) {
+        *error = tr("The selection holds no visible text.");
+        return false;
+    }
+    clearTextSelection();
+    return m_doc->removeText(page, rects, error);
+}
+
 bool PdfView::markupSelection(AnnotationData::Kind kind, const QColor &color)
 {
     if (!hasTextSelection()) {
@@ -1956,6 +1982,8 @@ void PdfView::contextMenuEvent(QContextMenuEvent *event)
         menu.addAction(tr("Strike Out"), this, [this] {
             markupSelection(AnnotationData::Kind::StrikeOut, lineColor());
         });
+        menu.addSeparator();
+        menu.addAction(tr("Remove Text from PDF"), this, &PdfView::removeTextRequested);
     } else {
         menu.addAction(tr("Remove Page %1").arg(page + 1), this, [this, page] {
             Q_EMIT removePagesRequested({page});

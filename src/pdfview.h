@@ -83,6 +83,8 @@ public:
     QString selectedText() const;
     void clearTextSelection();
     void copySelection() const;
+    // Deletes the selected text from the PDF itself (undoable).
+    bool removeSelectedText(QString *error);
     // Turns the current text selection into a markup annotation.
     bool markupSelection(AnnotationData::Kind kind, const QColor &color);
 
@@ -137,6 +139,7 @@ Q_SIGNALS:
     void removePagesRequested(const QList<int> &pages);
     void extractPagesRequested(const QList<int> &pages);
     void rotatePagesRequested(const QList<int> &pages, int degrees); // clockwise
+    void removeTextRequested(); // the selection menu asks to delete the selected text
 
 protected:
     void paintEvent(QPaintEvent *event) override;

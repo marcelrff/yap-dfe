@@ -236,6 +236,19 @@ private Q_SLOTS:
         const auto partDoc = Document::load(part, QStringLiteral("secret"), &status);
         QCOMPARE(status, Document::LoadStatus::Ok);
         QCOMPARE(partDoc->pageCount(), 2);
+
+        // So does removing text; saved, the file still needs the password.
+        const TextChar first = doc->pageText(0)->first();
+        QVERIFY2(doc->removeText(0, {first.rect.adjusted(first.rect.width() * 0.3, first.rect.height() * 0.3,
+                                                         -first.rect.width() * 0.3, -first.rect.height() * 0.3)},
+                                 &error),
+                 qPrintable(error));
+        QVERIFY(doc->pageText(0)->first().text != first.text || doc->pageText(0)->first().rect != first.rect);
+        const QString saved = m_dir.filePath(QStringLiteral("enc-saved.pdf"));
+        QVERIFY2(doc->save(saved, &error), qPrintable(error));
+        QVERIFY(!Document::load(saved, QString(), &status));
+        QCOMPARE(status, Document::LoadStatus::Locked);
+        QVERIFY(Document::load(saved, QStringLiteral("secret"), &status));
     }
 
     void tabs()
@@ -1528,6 +1541,119 @@ private Q_SLOTS:
         const QImage page2 = saved->render(1, QSize(210, 297));
         QVERIFY(isBlue(page2.pixelColor(105, 280)));
         QCOMPARE(saved->annotations(0).size(), 1);
+    }
+
+    void removeText()
+    {
+        // One line of ordinary-sized text, so neighbouring letters are close.
+        const QString path = m_dir.filePath(QStringLiteral("hello.pdf"));
+        {
+            QPdfWriter writer(path);
+            writer.setPageSize(QPageSize(QPageSize::A4));
+            QPainter p(&writer);
+            QFont font = p.font();
+            font.setPointSize(24);
+            p.setFont(font);
+            p.drawText(QRect(0, 0, writer.width(), writer.height() / 3), Qt::AlignCenter, QStringLiteral("Hello World"));
+            writer.newPage();
+            p.drawText(QRect(0, 0, writer.width(), writer.height() / 3), Qt::AlignCenter, QStringLiteral("Second page"));
+        }
+        Fixture f;
+        f.window.openFile(path);
+        f.window.unsavedPrompt = [](const QString &) { return QMessageBox::Discard; };
+        PdfView *v = f.left->currentView();
+        const std::shared_ptr<Document> doc = v->document();
+        QTRY_VERIFY(!f.window.isRendering());
+        // The words of a page. (A space glyph right next to removed letters
+        // may go with them, so go by word boundaries, not spaces.)
+        const auto textOf = [](const std::shared_ptr<Document> &d, int page) {
+            QString s;
+            int word = -1;
+            for (const TextChar &c : *d->pageText(page)) {
+                if (word >= 0 && c.word != word) {
+                    s += QLatin1Char(' ');
+                }
+                word = c.word;
+                s += c.text;
+            }
+            return s;
+        };
+        QCOMPARE(textOf(doc, 0), QStringLiteral("Hello World"));
+
+        // A note on the page stays.
+        AnnotationData note;
+        note.kind = AnnotationData::Kind::Note;
+        note.color = PdfView::noteColor();
+        note.contents = QStringLiteral("keep me");
+        note.boundary = QRectF(0.1, 0.5, 0.03, 0.02);
+        doc->addAnnotation(note);
+
+        // Select "Wo" with the mouse and remove it.
+        const auto text = doc->pageText(0);
+        const int w = textOf(doc, 0).indexOf(QLatin1Char('W')) - 1; // no char for the space
+        QVERIFY(w > 0);
+        QCOMPARE(text->at(w).text, QStringLiteral("W"));
+        QAction *remove = action(f.window, QStringLiteral("Remove Selected Text"));
+        QVERIFY(!remove->isEnabled());
+        const QPoint from = v->viewportPoint(0, text->at(w).rect.center()), to = v->viewportPoint(0, text->at(w + 1).rect.center());
+        QTest::mousePress(v->viewport(), Qt::LeftButton, {}, from);
+        QTest::mouseMove(v->viewport(), (from + to) / 2);
+        QTest::mouseMove(v->viewport(), to);
+        QTest::mouseRelease(v->viewport(), Qt::LeftButton, {}, to);
+        QCOMPARE(v->selectedText(), QStringLiteral("Wo"));
+        QVERIFY(remove->isEnabled());
+        QCOMPARE(remove->shortcut(), QKeySequence(Qt::SHIFT | Qt::Key_Delete));
+        trigger(f.window, QStringLiteral("Remove Selected Text"));
+
+        QCOMPARE(textOf(doc, 0), QStringLiteral("Hello rld"));
+        QCOMPARE(textOf(doc, 1), QStringLiteral("Second page"));
+        QVERIFY(!v->hasTextSelection());
+        QVERIFY(doc->isModified());
+        QCOMPARE(doc->annotations(0).size(), 1);
+        QVERIFY(doc->search(0, QStringLiteral("World"), false).isEmpty());
+        // The rest did not move.
+        const auto after = doc->pageText(0);
+        QVERIFY(qAbs(after->at(0).rect.x() - text->at(0).rect.x()) < 0.001);
+        QVERIFY(qAbs(after->last().rect.x() - text->last().rect.x()) < 0.001);
+
+        // And the letters are gone from the picture, not just from the text.
+        const QRectF gone = text->at(w).rect.united(text->at(w + 1).rect);
+        const auto inkIn = [&](const QImage &image) {
+            int dark = 0;
+            const QRect r(int(gone.x() * image.width()), int(gone.y() * image.height()), int(gone.width() * image.width()),
+                          int(gone.height() * image.height()));
+            for (int y = r.top(); y <= r.bottom(); ++y) {
+                for (int x = r.left(); x <= r.right(); ++x) {
+                    dark += qGray(image.pixel(x, y)) < 128;
+                }
+            }
+            return dark;
+        };
+        QCOMPARE(inkIn(doc->render(0, QSize(1240, 1754))), 0);
+
+        // Undo brings it back; Save writes the shortened text.
+        trigger(f.window, QStringLiteral("Undo"));
+        QCOMPARE(textOf(doc, 0), QStringLiteral("Hello World"));
+        QVERIFY(inkIn(doc->render(0, QSize(1240, 1754))) > 50);
+        trigger(f.window, QStringLiteral("Redo"));
+        trigger(f.window, QStringLiteral("Save"));
+        Document::LoadStatus status;
+        const auto saved = Document::load(path, QString(), &status);
+        QCOMPARE(status, Document::LoadStatus::Ok);
+        QCOMPARE(textOf(saved, 0), QStringLiteral("Hello rld"));
+        QCOMPARE(saved->annotations(0).size(), 1);
+
+        // Works on turned pages too: remove "Second" from page 2 after rotating it.
+        QString error;
+        QVERIFY2(doc->rotatePages({1}, 90, &error), qPrintable(error));
+        const auto turned = doc->pageText(1);
+        QList<QRectF> rects;
+        for (int i = 0; i < 6; ++i) {
+            const QRectF r = turned->at(i).rect;
+            rects.append(r.adjusted(r.width() * 0.3, r.height() * 0.3, -r.width() * 0.3, -r.height() * 0.3));
+        }
+        QVERIFY2(doc->removeText(1, rects, &error), qPrintable(error));
+        QCOMPARE(textOf(doc, 1), QStringLiteral("page"));
     }
 
     void links()

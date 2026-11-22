@@ -382,6 +382,8 @@ void MainWindow::createActions()
                          withView([](PdfView *v) { v->selectAllAnnotations(); }));
     m_deleteAction = add(edit, tr("&Delete Annotations"), {QKeySequence(Qt::Key_Delete)},
                          withView([](PdfView *v) { v->deleteSelectedAnnotations(); }));
+    m_removeTextAction = add(edit, tr("Remove Selected &Text"), {QKeySequence(Qt::SHIFT | Qt::Key_Delete)},
+                             withView([this](PdfView *v) { removeSelectedText(v); }));
     edit->addSeparator();
     m_viewActions << add(edit, tr("&Remove Pages…"), {}, withView([this](PdfView *v) {
         if (const auto pages = askPages(v, tr("Remove Pages"), tr("Pages to remove"))) {
@@ -968,6 +970,9 @@ void MainWindow::addView(PdfView *view, int pane, int insertAt)
         connect(view, &PdfView::extractPagesRequested, this, [this, view](const QList<int> &pages) {
             extractPages(view, pages);
         });
+        connect(view, &PdfView::removeTextRequested, this, [this, view] {
+            removeSelectedText(view);
+        });
         connect(view, &PdfView::rotatePagesRequested, this, [this, view](const QList<int> &pages, int degrees) {
             rotatePages(view, pages, degrees);
         });
@@ -1234,6 +1239,16 @@ void MainWindow::rotatePages(PdfView *v, const QList<int> &pages, int degrees)
                              5000);
 }
 
+void MainWindow::removeSelectedText(PdfView *v)
+{
+    QString error;
+    if (!v->removeSelectedText(&error)) {
+        QMessageBox::warning(this, tr("Cannot remove text"), error);
+        return;
+    }
+    statusBar()->showMessage(tr("Removed the text from the PDF. Ctrl+Z brings it back."), 5000);
+}
+
 void MainWindow::rotatePagesDialog(PdfView *v)
 {
     QString text = QString::number(v->currentPage() + 1);
@@ -1346,6 +1361,7 @@ void MainWindow::updateUi()
     m_redoAction->setEnabled(doc && doc->undoStack()->canRedo());
     m_saveAction->setEnabled(doc && doc->isModified());
     m_copyAction->setEnabled(v && v->hasTextSelection());
+    m_removeTextAction->setEnabled(v && v->hasTextSelection());
     m_backAction->setEnabled(v && v->canGoBack());
     m_forwardAction->setEnabled(v && v->canGoForward());
     m_deleteAction->setEnabled(v && !v->selectedAnnotations().isEmpty());
