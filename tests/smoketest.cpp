@@ -1428,6 +1428,108 @@ private Q_SLOTS:
         QCOMPARE(doc->pageCount(), 3);
     }
 
+    void rotatePages()
+    {
+        const QString copy = m_dir.filePath(QStringLiteral("rotate.pdf"));
+        QVERIFY(QFile::copy(m_a, copy)); // portrait, a blue band across the top
+        Fixture f;
+        f.window.openFile(copy);
+        f.window.unsavedPrompt = [](const QString &) { return QMessageBox::Discard; };
+        PdfView *v = f.left->currentView();
+        const std::shared_ptr<Document> doc = v->document();
+        QTRY_VERIFY(!f.window.isRendering());
+        const auto colorAt = [v](int page, QPointF n) {
+            return v->viewport()->grab().toImage().pixelColor(v->viewportPoint(page, n));
+        };
+        const auto isBlue = [](const QColor &c) {
+            return c.blue() > 100 && c.red() < 60 && c.green() < 60;
+        };
+        const auto isRed = [](const QColor &c) {
+            return c.red() > 180 && c.green() < 110 && c.blue() < 110;
+        };
+        const auto near = [](QPointF a, QPointF b) {
+            return qAbs(a.x() - b.x()) < 0.01 && qAbs(a.y() - b.y()) < 0.01;
+        };
+
+        // A horizontal red stroke on white paper below the band.
+        AnnotationData ink;
+        ink.kind = AnnotationData::Kind::Ink;
+        ink.color = PdfView::penColor();
+        ink.width = 3;
+        ink.paths = {{QPointF(0.2, 0.3), QPointF(0.3, 0.3), QPointF(0.4, 0.3)}};
+        ink.boundary = QRectF(0.2, 0.29, 0.2, 0.02);
+        const QString inkId = doc->addAnnotation(ink);
+        QTRY_VERIFY(!f.window.isRendering());
+        QVERIFY(isBlue(colorAt(0, QPointF(0.5, 0.1))));
+        QVERIFY(isRed(colorAt(0, QPointF(0.3, 0.3))));
+
+        // Ctrl+R turns the current page clockwise: the band ends up on the
+        // right, and the stroke turns with the page, (x, y) -> (1 - y, x).
+        QCOMPARE(action(f.window, QStringLiteral("Rotate Page Clockwise"))->shortcut(), QKeySequence(Qt::CTRL | Qt::Key_R));
+        trigger(f.window, QStringLiteral("Rotate Page Clockwise"));
+        QCOMPARE(doc->pageCount(), 6);
+        QVERIFY(doc->pageSize(0).width() > doc->pageSize(0).height());
+        QVERIFY(doc->pageSize(1).width() < doc->pageSize(1).height());
+        QVERIFY(doc->isModified());
+        QTRY_VERIFY(!f.window.isRendering());
+        QVERIFY(isBlue(colorAt(0, QPointF(0.9, 0.5))));
+        QCOMPARE(colorAt(0, QPointF(0.5, 0.1)), QColor(Qt::white));
+        const AnnotationData turned = doc->annotations(0).first();
+        QVERIFY(near(turned.paths.first().first(), QPointF(0.7, 0.2)));
+        QVERIFY(near(turned.paths.first().last(), QPointF(0.7, 0.4)));
+        QVERIFY(isRed(colorAt(0, QPointF(0.7, 0.3)))); // drawn where it says it is
+
+        // Clicking it still finds it, and a new stroke lands under the mouse.
+        QTest::mouseClick(v->viewport(), Qt::LeftButton, {}, v->viewportPoint(0, QPointF(0.7, 0.3)));
+        QCOMPARE(v->selectedAnnotation(), turned.id);
+        trigger(f.window, QStringLiteral("Pen"));
+        const QPoint from = v->viewportPoint(0, QPointF(0.2, 0.6)), to = v->viewportPoint(0, QPointF(0.4, 0.6));
+        QTest::mousePress(v->viewport(), Qt::LeftButton, {}, from);
+        QTest::mouseMove(v->viewport(), (from + to) / 2);
+        QTest::mouseMove(v->viewport(), to);
+        QTest::mouseRelease(v->viewport(), Qt::LeftButton, {}, to);
+        QTest::keyClick(v, Qt::Key_Escape);
+        QCOMPARE(doc->annotations(0).size(), 2);
+        QTRY_VERIFY(!f.window.isRendering());
+        QVERIFY(isRed(colorAt(0, QPointF(0.3, 0.6))));
+        trigger(f.window, QStringLiteral("Undo")); // the new stroke
+
+        // Undo turns the page back, stroke included.
+        trigger(f.window, QStringLiteral("Undo"));
+        QVERIFY(doc->pageSize(0).width() < doc->pageSize(0).height());
+        QVERIFY(near(doc->annotations(0).first().paths.first().first(), QPointF(0.2, 0.3)));
+        QCOMPARE(doc->annotations(0).first().id, inkId);
+        QTRY_VERIFY(!f.window.isRendering());
+        QVERIFY(isBlue(colorAt(0, QPointF(0.5, 0.1))));
+
+        // Rotate Pages… asks for pages and an angle, again if the pages are wrong.
+        QStringList problems;
+        QList<std::pair<QString, int>> answers{{QStringLiteral("x"), 180}, {QStringLiteral("2-3"), 180}};
+        f.window.rotatePrompt = [&](const QString &problem, const QString &, int) -> std::optional<std::pair<QString, int>> {
+            problems.append(problem);
+            return answers.takeFirst();
+        };
+        trigger(f.window, QStringLiteral("Rotate Pages…"));
+        QCOMPARE(problems.size(), 2);
+        QVERIFY(problems.first().isEmpty());
+        QVERIFY(!problems.last().isEmpty());
+        const QImage second = doc->render(1, QSize(210, 297)), third = doc->render(2, QSize(210, 297));
+        QVERIFY(isBlue(second.pixelColor(105, 280))); // upside down
+        QVERIFY(isBlue(third.pixelColor(105, 280)));
+        QVERIFY(isBlue(doc->render(0, QSize(210, 297)).pixelColor(105, 20))); // page 1 untouched
+        QVERIFY(isBlue(doc->render(3, QSize(210, 297)).pixelColor(105, 20))); // and page 4
+
+        // The rotation is saved with the file.
+        trigger(f.window, QStringLiteral("Save"));
+        Document::LoadStatus status;
+        const auto saved = Document::load(copy, QString(), &status);
+        QCOMPARE(status, Document::LoadStatus::Ok);
+        QVERIFY(saved->pageSize(0).width() < saved->pageSize(0).height());
+        const QImage page2 = saved->render(1, QSize(210, 297));
+        QVERIFY(isBlue(page2.pixelColor(105, 280)));
+        QCOMPARE(saved->annotations(0).size(), 1);
+    }
+
     void links()
     {
         Document::LoadStatus status;

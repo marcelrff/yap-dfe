@@ -1963,6 +1963,13 @@ void PdfView::contextMenuEvent(QContextMenuEvent *event)
         menu.addAction(tr("Extract Page %1…").arg(page + 1), this, [this, page] {
             Q_EMIT extractPagesRequested({page});
         });
+        menu.addSeparator();
+        menu.addAction(tr("Rotate Page %1 Clockwise").arg(page + 1), this, [this, page] {
+            Q_EMIT rotatePagesRequested({page}, 90);
+        });
+        menu.addAction(tr("Rotate Page %1 Counterclockwise").arg(page + 1), this, [this, page] {
+            Q_EMIT rotatePagesRequested({page}, 270);
+        });
     }
     menu.exec(event->globalPos());
 }

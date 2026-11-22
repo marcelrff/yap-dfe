@@ -136,6 +136,7 @@ Q_SIGNALS:
     // The page menu asks to remove or extract pages (0-based).
     void removePagesRequested(const QList<int> &pages);
     void extractPagesRequested(const QList<int> &pages);
+    void rotatePagesRequested(const QList<int> &pages, int degrees); // clockwise
 
 protected:
     void paintEvent(QPaintEvent *event) override;

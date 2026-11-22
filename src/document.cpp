@@ -729,9 +729,7 @@ void Document::applyUpdate(const AnnotationData &data)
 // --- pages --------------------------------------------------------------------
 
 namespace {
-// Copies `pages` (0-based, ascending) of `in` into a new file `out`, keeping
-// their annotations, links and form fields, using qpdf.
-bool copyPages(const QString &in, const QString &password, const QList<int> &pages, const QString &out, QString *error)
+QString qpdfRanges(const QList<int> &pages)
 {
     QStringList ranges;
     for (int i = 0; i < pages.size();) {
@@ -742,11 +740,18 @@ bool copyPages(const QString &in, const QString &password, const QList<int> &pag
         ranges.append(i == j ? QString::number(pages.at(i) + 1) : QStringLiteral("%1-%2").arg(pages.at(i) + 1).arg(pages.at(j) + 1));
         i = j + 1;
     }
+    return ranges.join(QLatin1Char(','));
+}
+
+// Runs qpdf on `in` with `options`, writing `out`.
+bool runQpdf(const QString &in, const QString &password, const std::vector<std::string> &options, const QString &out, QString *error)
+{
     std::vector<std::string> args{"qpdf", "--warning-exit-0", "--no-warn", in.toStdString()};
     if (!password.isEmpty()) {
         args.push_back("--password=" + password.toStdString());
     }
-    args.insert(args.end(), {"--pages", ".", ranges.join(QLatin1Char(',')).toStdString(), "--", out.toStdString()});
+    args.insert(args.end(), options.begin(), options.end());
+    args.push_back(out.toStdString());
     std::vector<const char *> argv;
     for (const std::string &a : args) {
         argv.push_back(a.c_str());
@@ -757,14 +762,21 @@ bool copyPages(const QString &in, const QString &password, const QList<int> &pag
         job.initializeFromArgv(argv.data());
         job.run();
         if (job.getExitCode() == QPDFJob::EXIT_ERROR) {
-            *error = QCoreApplication::translate("Document", "The pages could not be copied.");
+            *error = QCoreApplication::translate("Document", "The pages could not be changed.");
             return false;
         }
     } catch (const std::exception &e) {
-        *error = QCoreApplication::translate("Document", "The pages could not be copied: %1").arg(QString::fromLocal8Bit(e.what()));
+        *error = QCoreApplication::translate("Document", "The pages could not be changed: %1").arg(QString::fromLocal8Bit(e.what()));
         return false;
     }
     return true;
+}
+
+// Copies `pages` (0-based, ascending) of `in` into a new file `out`, keeping
+// their annotations, links and form fields.
+bool copyPages(const QString &in, const QString &password, const QList<int> &pages, const QString &out, QString *error)
+{
+    return runQpdf(in, password, {"--pages", ".", qpdfRanges(pages).toStdString(), "--"}, out, error);
 }
 } // namespace
 
@@ -837,16 +849,7 @@ std::optional<QList<int>> Document::parsePageRanges(const QString &text, int pag
 
 QString Document::formatPageRanges(const QList<int> &pages)
 {
-    QStringList parts;
-    for (int i = 0; i < pages.size();) {
-        int j = i;
-        while (j + 1 < pages.size() && pages.at(j + 1) == pages.at(j) + 1) {
-            ++j;
-        }
-        parts.append(i == j ? QString::number(pages.at(i) + 1) : QStringLiteral("%1-%2").arg(pages.at(i) + 1).arg(pages.at(j) + 1));
-        i = j + 1;
-    }
-    return parts.join(QStringLiteral(", "));
+    return qpdfRanges(pages).replace(QLatin1Char(','), QStringLiteral(", "));
 }
 
 bool Document::writeTo(const QString &path, QString *error)
@@ -941,6 +944,32 @@ bool Document::removePages(const QList<int> &pages, QString *error)
     const int n = pageCount() - keep.size();
     m_undo.push(new PagesCommand(this, before, after,
                                  n == 1 ? tr("Remove page %1").arg(pages.first() + 1) : tr("Remove %1 pages").arg(n)));
+    return true;
+}
+
+bool Document::rotatePages(const QList<int> &pages, int degrees, QString *error)
+{
+    degrees = ((degrees % 360) + 360) % 360;
+    if (pages.isEmpty() || degrees % 90 != 0) {
+        *error = pages.isEmpty() ? tr("No pages chosen.") : tr("Pages turn by multiples of 90°.");
+        return false;
+    }
+    if (degrees == 0) {
+        return true;
+    }
+    const QString before = workFile(), after = workFile();
+    if (before.isEmpty()) {
+        *error = tr("Cannot create a temporary file.");
+        return false;
+    }
+    const std::string rotate = QStringLiteral("--rotate=+%1:%2").arg(degrees).arg(qpdfRanges(pages)).toStdString();
+    if (!writeTo(before, error) || !runQpdf(before, m_password, {rotate}, after, error)) {
+        QFile::remove(before);
+        QFile::remove(after);
+        return false;
+    }
+    m_undo.push(new PagesCommand(this, before, after,
+                                 pages.size() == 1 ? tr("Rotate page %1").arg(pages.first() + 1) : tr("Rotate %1 pages").arg(pages.size())));
     return true;
 }
 

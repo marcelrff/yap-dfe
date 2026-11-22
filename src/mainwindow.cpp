@@ -20,6 +20,11 @@
 #include <QStyleHints>
 #include <QToolBar>
 #include <QFileDialog>
+#include <QPushButton>
+#include <QFormLayout>
+#include <QDialogButtonBox>
+#include <QDialog>
+#include <QComboBox>
 #include <QFileInfo>
 #include <QFrame>
 #include <QInputDialog>
@@ -173,6 +178,38 @@ MainWindow::MainWindow(QWidget *parent)
         bool ok = false;
         const QString answer = QInputDialog::getText(this, title, label, QLineEdit::Normal, text, &ok);
         return ok ? answer : QString();
+    };
+    rotatePrompt = [this](const QString &problem, const QString &text, int degrees) -> std::optional<std::pair<QString, int>> {
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Rotate Pages"));
+        auto *form = new QFormLayout(&dialog);
+        if (!problem.isEmpty()) {
+            auto *note = new QLabel(problem, &dialog);
+            note->setWordWrap(true);
+            QPalette pal = note->palette();
+            pal.setColor(QPalette::WindowText, QColor(200, 40, 40));
+            note->setPalette(pal);
+            form->addRow(note);
+        }
+        auto *pages = new QLineEdit(text, &dialog);
+        pages->setPlaceholderText(tr("for example 1-3, 5, 8-"));
+        pages->selectAll();
+        form->addRow(tr("&Pages:"), pages);
+        auto *angle = new QComboBox(&dialog);
+        angle->addItem(tr("90° clockwise"), 90);
+        angle->addItem(tr("180°"), 180);
+        angle->addItem(tr("90° counterclockwise"), 270);
+        angle->setCurrentIndex(std::max(0, angle->findData(degrees)));
+        form->addRow(tr("&Turn:"), angle);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        buttons->button(QDialogButtonBox::Ok)->setText(tr("Rotate"));
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        form->addRow(buttons);
+        if (dialog.exec() != QDialog::Accepted) {
+            return std::nullopt;
+        }
+        return std::pair(pages->text(), angle->currentData().toInt());
     };
     extractPathPrompt = [this](const QString &suggested) {
         return QFileDialog::getSaveFileName(this, tr("Extract Pages"), suggested, tr("PDF documents (*.pdf)"));
@@ -351,6 +388,11 @@ void MainWindow::createActions()
             removePages(v, *pages);
         }
     }));
+    m_viewActions << add(edit, tr("Rotate Page &Clockwise"), {QKeySequence(Qt::CTRL | Qt::Key_R)},
+                         withView([this](PdfView *v) { rotatePages(v, {v->currentPage()}, 90); }));
+    m_viewActions << add(edit, tr("Rotate Page C&ounterclockwise"), {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R)},
+                         withView([this](PdfView *v) { rotatePages(v, {v->currentPage()}, 270); }));
+    m_viewActions << add(edit, tr("Ro&tate Pages…"), {}, withView([this](PdfView *v) { rotatePagesDialog(v); }));
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     m_viewActions << add(view, tr("Zoom &In"), {QKeySequence(Qt::CTRL | Qt::Key_Plus), QKeySequence(Qt::CTRL | Qt::Key_Equal)},
@@ -926,6 +968,9 @@ void MainWindow::addView(PdfView *view, int pane, int insertAt)
         connect(view, &PdfView::extractPagesRequested, this, [this, view](const QList<int> &pages) {
             extractPages(view, pages);
         });
+        connect(view, &PdfView::rotatePagesRequested, this, [this, view](const QList<int> &pages, int degrees) {
+            rotatePages(view, pages, degrees);
+        });
         connect(doc, &Document::pagesChanged, this, &MainWindow::updateUi);
         view->setDarkMode(m_dark && m_darkPages);
         connect(view, &PdfView::toolFinished, this, [this] {
@@ -1175,6 +1220,37 @@ void MainWindow::extractPages(PdfView *v, const QList<int> &pages)
     }
     noteRecentFile(path);
     statusBar()->showMessage(tr("Extracted %n page(s) to %1", nullptr, pages.size()).arg(QFileInfo(path).fileName()), 5000);
+}
+
+void MainWindow::rotatePages(PdfView *v, const QList<int> &pages, int degrees)
+{
+    QString error;
+    if (!v->document()->rotatePages(pages, degrees, &error)) {
+        QMessageBox::warning(this, tr("Cannot rotate pages"), error);
+        return;
+    }
+    statusBar()->showMessage(pages.size() == 1 ? tr("Rotated page %1. Ctrl+Z turns it back.").arg(pages.first() + 1)
+                                               : tr("Rotated pages %1. Ctrl+Z turns them back.").arg(Document::formatPageRanges(pages)),
+                             5000);
+}
+
+void MainWindow::rotatePagesDialog(PdfView *v)
+{
+    QString text = QString::number(v->currentPage() + 1);
+    int degrees = 90;
+    QString problem;
+    for (;;) {
+        const auto answer = rotatePrompt(problem, text, degrees);
+        if (!answer) {
+            return;
+        }
+        text = answer->first;
+        degrees = answer->second;
+        if (const auto pages = Document::parsePageRanges(text, v->pageCount(), &problem)) {
+            rotatePages(v, *pages, degrees);
+            return;
+        }
+    }
 }
 
 void MainWindow::goToPageDialog()

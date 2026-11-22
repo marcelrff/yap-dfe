@@ -86,6 +86,7 @@ open and brings it to the front. `--new-window` opens a separate one instead.
 | Select all annotations | Ctrl+A |
 | Delete selected annotations | Del |
 | Save / save as | Ctrl+S / Ctrl+Shift+S |
+| Rotate page clockwise / counterclockwise | Ctrl+R / Ctrl+Shift+R |
 | Back to Select | Esc |
 
 - With text selected, Alt+2…7 marks that text. With nothing selected they
@@ -108,12 +109,15 @@ open and brings it to the front. `--new-window` opens a separate one instead.
 
 ## Pages
 
-Edit → Remove Pages… and File → Extract Pages… ask for pages like
-`1-3, 5, 8-` (`8-` runs to the last page, `-3` from the first). Right-click
-blank paper on a page to remove or extract just that page.
+Edit → Remove Pages…, Edit → Rotate Pages… and File → Extract Pages… ask
+for pages like `1-3, 5, 8-` (`8-` runs to the last page, `-3` from the
+first). Ctrl+R / Ctrl+Shift+R turn the current page clockwise /
+counterclockwise. Right-click blank paper on a page to remove, extract or
+rotate just that page.
 
-- Removing pages is an edit like any other: Ctrl+Z brings them back, and the
-  file on disk changes only when you save.
+- Removing and rotating pages are edits like any other: Ctrl+Z undoes them,
+  and the file on disk changes only when you save. Annotations turn with
+  their page.
 - Extracting writes the pages, with their annotations (saved or not), to a
   new PDF and leaves the document as it is.
 - Password-protected files stay protected with the same password.

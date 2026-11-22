@@ -65,6 +65,10 @@ public:
     std::function<QString(const QString &title, const QString &label, const QString &text)> pageRangePrompt;
     // Asks where extracted pages go; empty means cancelled. Replaceable for tests.
     std::function<QString(const QString &suggested)> extractPathPrompt;
+    // Asks which pages to turn and how far (90, 180 or 270 degrees
+    // clockwise), starting from `text` and `degrees`; `problem` says what was
+    // wrong with the last answer. Nothing means cancelled. Replaceable for tests.
+    std::function<std::optional<std::pair<QString, int>>(const QString &problem, const QString &text, int degrees)> rotatePrompt;
 
     // Starts another yap-dfe process with these arguments. Replaceable so
     // tests can see the arguments instead.
@@ -131,6 +135,8 @@ private:
     std::optional<QList<int>> askPages(PdfView *v, const QString &title, const QString &label);
     void removePages(PdfView *v, const QList<int> &pages);
     void extractPages(PdfView *v, const QList<int> &pages);
+    void rotatePages(PdfView *v, const QList<int> &pages, int degrees);
+    void rotatePagesDialog(PdfView *v);
     void setActivePane(int pane);
     void addView(PdfView *view, int pane, int insertAt = -1);
     void normalizePanes();

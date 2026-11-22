@@ -124,6 +124,9 @@ public:
     bool extractPages(const QList<int> &pages, const QString &path, QString *error);
     // Removes the given pages, as one undoable step. Not all of them.
     bool removePages(const QList<int> &pages, QString *error);
+    // Turns pages by `degrees` (a multiple of 90, positive is clockwise), as
+    // one undoable step.
+    bool rotatePages(const QList<int> &pages, int degrees, QString *error);
     // Parses "1-3, 5, 8-" (1-based, "8-" runs to the end) into a page list.
     static std::optional<QList<int>> parsePageRanges(const QString &text, int pageCount, QString *error);
     // The inverse, for display: 0-based pages to "1-3, 5".
